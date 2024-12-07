@@ -1,7 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-Forex Trading Bot V2 - System Entry Point
+"""Forex Trading Bot V2 - System Entry Point.
 
 This module serves as the primary entry point for the Forex Trading Bot V2 system.
 It provides a clean command-line interface for launching and controlling the trading
@@ -36,7 +33,7 @@ Command Line Arguments:
     --mode:  Operation mode ('auto' or 'manual')
             - auto: Fully automated trading (default)
             - manual: Requires trade confirmation
-    
+
     --debug: Enable debug level logging
             - Provides detailed operational information
             - Includes component state transitions
@@ -71,19 +68,24 @@ from pathlib import Path
 from typing import NoReturn
 
 # Add project root to Python path for reliable imports
-project_root = str(Path(__file__).parent.absolute())
-sys.path.append(project_root)
+# This ensures imports work correctly regardless of where the script is executed from
+# Must be done before any project-specific imports
+PROJECT_ROOT = str(Path(__file__).parent.absolute())
+sys.path.append(PROJECT_ROOT)
 
-from src.core.bot import ForexBot
+# Import placed here intentionally after path setup
+# pylint: disable=wrong-import-position
+# Reason: This import must occur after PROJECT_ROOT is added to sys.path
+# Future imports should also be placed here if they depend on the project structure
+from src.core.bot import ForexBot  # Main bot orchestrator class
+
+# Note: Any additional project-specific imports should follow the same pattern
+# from src.core.dashboard import Dashboard  # Example of another project import
 
 def parse_arguments() -> argparse.Namespace:
-    """
-    Parse and validate command line arguments for bot configuration.
+    """Parse and validate command line arguments for the trading bot.
 
-    This function sets up the argument parser and defines the valid command line
-    options for configuring the bot's operation. It provides a user-friendly
-    interface for controlling bot behavior while maintaining strict argument
-    validation.
+    Processes command-line inputs to configure bot operation mode and debug settings.
 
     Returns:
         argparse.Namespace: Parsed command line arguments containing:
@@ -94,7 +96,7 @@ def parse_arguments() -> argparse.Namespace:
         --mode:  Operation mode selection
                 - auto: Fully automated trading (default)
                 - manual: Requires trade confirmation
-        
+
         --debug: Enable detailed debug logging
 
     Example:
@@ -111,25 +113,31 @@ def parse_arguments() -> argparse.Namespace:
         description='Forex Trading Bot V2 - Advanced Automated Trading System',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    
+
     parser.add_argument(
         '--mode',
         choices=['auto', 'manual'],
         default='auto',
         help='Trading operation mode (auto: fully automated, manual: requires confirmation)'
     )
-    
+
     parser.add_argument(
         '--debug',
         action='store_true',
         help='Enable debug level logging for detailed operational information'
     )
-    
+
+    # Future CLI arguments will include:
+    # --config: Path to configuration file
+    # --risk-profile: Trading risk profile selection
+    # --log-level: Fine-grained logging control
+    # --session: Specify trading sessions to participate in
+
     return parser.parse_args()
 
+
 def main() -> NoReturn:
-    """
-    Primary entry point for the Forex Trading Bot V2 system.
+    """Primary entry point for the Forex Trading Bot V2 system.
 
     This function serves as the main entry point and orchestrates the high-level
     flow of the application. It maintains minimal responsibilities while ensuring
@@ -167,28 +175,23 @@ def main() -> NoReturn:
         - All trading functionality is delegated to the bot
         - Maintains clean separation of concerns
     """
-    # Process command line arguments
     args = parse_arguments()
-    
+
     try:
-        # Initialize and run bot with configuration
         bot = ForexBot(
             mode=args.mode,
             debug=args.debug
         )
-        
-        # Start bot execution - ForexBot handles all core functionality
         bot.run()
-        
+
     except KeyboardInterrupt:
-        # Handle clean shutdown on Ctrl+C
         print("\nShutdown signal received - initiating graceful shutdown...")
         sys.exit(0)
-    except Exception as e:
-        # Handle unexpected errors
+    except (RuntimeError, ConnectionError, ValueError) as e:
         print(f"\nFatal error occurred: {str(e)}")
         print("See logs for detailed error information")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

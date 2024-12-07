@@ -1,19 +1,28 @@
 # Project Documentation
 
-Generated on: 2024-12-03 07:03:55
+Generated on: 2024-12-07 14:27:43
 
 ## Directory Structure
 Forex_V2
 ├── src/
-│   └── core/
-│       ├── bot.py
-│       └── dashboard.py
-├── PROJECT_STRUCTURE_20241203_070355.md
+│   ├── core/
+│   │   ├── __init__.py
+│   │   ├── bot.py
+│   │   ├── dashboard.py
+│   │   └── mt5.py
+│   └── __init__.py
+├── .gitignore
+├── PROJECT_STRUCTURE_20241207_142743.md
 ├── generate_file_structure.py
-└── main.py
+├── main.py
+└── tasks.py
 
 ## File Contents
 
+
+### .gitignore (524.00 B)
+
+*Binary or unsupported file format*
 
 ### generate_file_structure.py (10.28 KB)
 
@@ -277,13 +286,10 @@ if __name__ == "__main__":
 
 ```
 
-### main.py (6.33 KB)
+### main.py (6.68 KB)
 
 ```py
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-Forex Trading Bot V2 - System Entry Point
+"""Forex Trading Bot V2 - System Entry Point.
 
 This module serves as the primary entry point for the Forex Trading Bot V2 system.
 It provides a clean command-line interface for launching and controlling the trading
@@ -318,7 +324,7 @@ Command Line Arguments:
     --mode:  Operation mode ('auto' or 'manual')
             - auto: Fully automated trading (default)
             - manual: Requires trade confirmation
-    
+
     --debug: Enable debug level logging
             - Provides detailed operational information
             - Includes component state transitions
@@ -353,19 +359,24 @@ from pathlib import Path
 from typing import NoReturn
 
 # Add project root to Python path for reliable imports
-project_root = str(Path(__file__).parent.absolute())
-sys.path.append(project_root)
+# This ensures imports work correctly regardless of where the script is executed from
+# Must be done before any project-specific imports
+PROJECT_ROOT = str(Path(__file__).parent.absolute())
+sys.path.append(PROJECT_ROOT)
 
-from src.core.bot import ForexBot
+# Import placed here intentionally after path setup
+# pylint: disable=wrong-import-position
+# Reason: This import must occur after PROJECT_ROOT is added to sys.path
+# Future imports should also be placed here if they depend on the project structure
+from src.core.bot import ForexBot  # Main bot orchestrator class
+
+# Note: Any additional project-specific imports should follow the same pattern
+# from src.core.dashboard import Dashboard  # Example of another project import
 
 def parse_arguments() -> argparse.Namespace:
-    """
-    Parse and validate command line arguments for bot configuration.
+    """Parse and validate command line arguments for the trading bot.
 
-    This function sets up the argument parser and defines the valid command line
-    options for configuring the bot's operation. It provides a user-friendly
-    interface for controlling bot behavior while maintaining strict argument
-    validation.
+    Processes command-line inputs to configure bot operation mode and debug settings.
 
     Returns:
         argparse.Namespace: Parsed command line arguments containing:
@@ -376,7 +387,7 @@ def parse_arguments() -> argparse.Namespace:
         --mode:  Operation mode selection
                 - auto: Fully automated trading (default)
                 - manual: Requires trade confirmation
-        
+
         --debug: Enable detailed debug logging
 
     Example:
@@ -393,25 +404,31 @@ def parse_arguments() -> argparse.Namespace:
         description='Forex Trading Bot V2 - Advanced Automated Trading System',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
-    
+
     parser.add_argument(
         '--mode',
         choices=['auto', 'manual'],
         default='auto',
         help='Trading operation mode (auto: fully automated, manual: requires confirmation)'
     )
-    
+
     parser.add_argument(
         '--debug',
         action='store_true',
         help='Enable debug level logging for detailed operational information'
     )
-    
+
+    # Future CLI arguments will include:
+    # --config: Path to configuration file
+    # --risk-profile: Trading risk profile selection
+    # --log-level: Fine-grained logging control
+    # --session: Specify trading sessions to participate in
+
     return parser.parse_args()
 
+
 def main() -> NoReturn:
-    """
-    Primary entry point for the Forex Trading Bot V2 system.
+    """Primary entry point for the Forex Trading Bot V2 system.
 
     This function serves as the main entry point and orchestrates the high-level
     flow of the application. It maintains minimal responsibilities while ensuring
@@ -449,70 +466,157 @@ def main() -> NoReturn:
         - All trading functionality is delegated to the bot
         - Maintains clean separation of concerns
     """
-    # Process command line arguments
     args = parse_arguments()
-    
+
     try:
-        # Initialize and run bot with configuration
         bot = ForexBot(
             mode=args.mode,
             debug=args.debug
         )
-        
-        # Start bot execution - ForexBot handles all core functionality
         bot.run()
-        
+
     except KeyboardInterrupt:
-        # Handle clean shutdown on Ctrl+C
         print("\nShutdown signal received - initiating graceful shutdown...")
         sys.exit(0)
-    except Exception as e:
-        # Handle unexpected errors
+    except (RuntimeError, ConnectionError, ValueError) as e:
         print(f"\nFatal error occurred: {str(e)}")
         print("See logs for detailed error information")
         sys.exit(1)
 
+
 if __name__ == "__main__":
     main()
+
 ```
 
-### src\core\bot.py (2.06 KB)
+### tasks.py (1.04 KB)
 
 ```py
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""
-Forex Trading Bot V2 - Bot Orchestrator
+from invoke import task
 
-This module contains the ForexBot class that serves as the central orchestrator
+@task
+def format(c):
+    """Run automatic code formatters.
+
+    Args:
+        c: The invoke context object.
+    """
+    print("=== Starting Format Task ===")
+
+    print("\n1. Running docformatter...")
+    try:
+        c.run("docformatter --in-place --recursive .")
+    except Exception as e:
+        print(f"docformatter error: {e}")
+
+    print("=== Format Task Complete ===")
+
+@task
+def lint(c):
+    """Run code style checking tools.
+
+    Args:
+        c: The invoke context object.
+    """
+    print("=== Starting Lint Task ===")
+
+    print("\n1. Running pydocstyle...")
+    try:
+        c.run("pydocstyle .")
+    except Exception as e:
+        print(f"pydocstyle error: {e}")
+
+    print("\n2. Running pylint...")
+    try:
+        c.run("pylint .")
+    except Exception as e:
+        print(f"pylint error: {e}")
+
+    print("\n=== Lint Task Complete ===")
+
+@task(format, lint)
+def all(c):
+    """Run all tasks in sequence.
+
+    Args:
+        c: The invoke context object.
+    """
+    pass
+```
+
+### src\__init__.py (0.00 B)
+
+```py
+
+```
+
+### src\core\__init__.py (0.00 B)
+
+```py
+
+```
+
+### src\core\bot.py (4.30 KB)
+
+```py
+"""Forex Trading Bot V2 - Bot Orchestrator.
+
+This module contains the `ForexBot` class that serves as the central orchestrator
 for the trading system. The bot is responsible for:
+
 1. Managing core components
 2. Coordinating trading operations
 3. Maintaining system state
+
+The `ForexBot` class is the main entry point for the bot's execution. It initializes
+the necessary components, such as the dashboard, and runs the main bot loop. The
+bot loop updates the dashboard with the latest system data, which can include
+account information, open positions, market status, and overall system health.
+
+The bot can operate in two modes: "auto" and "manual". In "auto" mode, the bot
+will execute trades automatically based on its trading strategy. In "manual" mode,
+the bot will require user confirmation before executing any trades.
+
+The bot also supports debug logging, which can provide detailed operational
+information for troubleshooting and development purposes.
 
 Author: mazelcar
 Created: December 2024
 """
 
 import time
-import logging
-from datetime import datetime
-from typing import Dict, Optional
+from src.core.dashboard import Dashboard  # Fixed absolute import
 
-from src.core.dashboard import Dashboard
 
 class ForexBot:
-    """Core bot orchestrator for the trading system."""
-    
+    """Core bot orchestrator for the trading system.
+
+    This class serves as the main entry point for the Forex Trading Bot V2 system.
+    It is responsible for initializing the necessary components, running the main
+    bot loop, and handling shutdown and cleanup.
+
+    Attributes:
+        mode (str): The operation mode of the bot ('auto' or 'manual').
+        running (bool): Flag indicating whether the bot is currently running.
+        dashboard (Dashboard): Instance of the dashboard component.
+        test_data (dict): Placeholder data for the bot's state.
+    """
+
     def __init__(self, mode: str = 'auto', debug: bool = False) -> None:
-        """Initialize bot with its own configuration and components."""
+        """Initialize the ForexBot with its configuration and components.
+
+        Args:
+            mode (str): Operation mode ('auto' or 'manual').
+            debug (bool): Flag to enable debug-level logging.
+        """
         self.mode = mode
         self.running = False
-        
+        self._setup_logging(debug)
+
         # Initialize components
         self.dashboard = Dashboard()
-        
-        # Initialize placeholder data (will come from real components later)
+
+        # Initialize placeholder data
         self.test_data = {
             'account': {
                 'balance': 10000.00,
@@ -530,35 +634,66 @@ class ForexBot:
                 'risk_manager': 'OK'
             }
         }
-        
+
+    def _setup_logging(self, debug: bool) -> None:
+        """Set up logging configuration.
+
+        Args:
+            debug (bool): Enable debug logging if True.
+        """
+        if debug:
+            self.dashboard.log_level = 'DEBUG'
+
     def run(self) -> None:
-        """Main bot execution loop."""
+        """Run the main bot execution loop.
+
+        This method runs the central bot loop, which updates the bot's internal
+        state and the dashboard with the latest data. The loop continues until
+        the bot is explicitly stopped (e.g., by a keyboard interrupt).
+
+        The bot loop performs the following steps:
+        1. Update the bot's internal data (currently using placeholder data)
+        2. Update the dashboard with the current bot state
+        3. Control the update frequency by sleeping for 1 second
+
+        Raises:
+            KeyboardInterrupt: When the user interrupts the bot (e.g., Ctrl+C).
+        """
         self.running = True
-        
+
         try:
             while self.running:
                 # Update data (will be real data later)
                 self.test_data['positions'] = []  # No positions for now
-                
+
                 # Update dashboard with current data
                 self.dashboard.update(self.test_data)
-                
+
                 # Control update frequency
                 time.sleep(1)
-                
+
         except KeyboardInterrupt:
             self.running = False
         finally:
             print("\nBot stopped")
+
+    def stop(self) -> None:
+        """Stop the bot execution gracefully.
+
+        This method provides a clean way to stop the bot's execution
+        from outside the main loop.
+        """
+        self.running = False
+
 ```
 
-### src\core\dashboard.py (3.38 KB)
+### src\core\dashboard.py (3.35 KB)
 
 ```py
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Forex Trading Bot V2 - Dashboard
+Forex Trading Bot V2 - Dashboard.
 
 This module implements the critical monitoring dashboard for the trading system.
 The dashboard is a core component responsible for:
@@ -574,7 +709,7 @@ Created: December 2024
 
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 class Dashboard:
     """Critical system monitoring dashboard."""
@@ -636,8 +771,7 @@ class Dashboard:
         print("\nPress Ctrl+C to exit")
 
     def update(self, data: Dict) -> None:
-        """
-        Update the entire dashboard with new data.
+        """Update the entire dashboard with new data.
 
         Args:
             data: Dictionary containing all dashboard sections:
@@ -653,13 +787,203 @@ class Dashboard:
         self.render_market_status(data['market'])
         self.render_system_status(data['system'])
         self.render_footer()
-        
+
         self.last_update = datetime.now()
+
+```
+
+### src\core\mt5.py (5.60 KB)
+
+```py
+"""MT5 Integration Module for Forex Trading Bot V2.
+
+Handles core MetaTrader5 functionality:
+1. Connection to MT5 terminal
+2. Account information
+3. Placing trades
+4. Getting market data
+5. Managing positions
+
+Author: mazelcar
+Created: December 2024
+"""
+
+import MetaTrader5 as mt5
+from datetime import datetime
+from typing import Dict, List, Optional
+
+
+class MT5Handler:
+    """Handles MetaTrader 5 operations."""
+
+    def __init__(self, debug: bool = False):
+        """Initialize MT5 handler.
+
+        Args:
+            debug: Enable debug logging
+        """
+        self.connected = False
+        self._initialize_mt5()
+
+    def _initialize_mt5(self) -> bool:
+        """Connect to MT5 terminal."""
+        try:
+            if not mt5.initialize():
+                return False
+            self.connected = True
+            return True
+        except Exception as e:
+            print(f"MT5 initialization error: {e}")
+            return False
+
+    def login(self, username: str, password: str, server: str) -> bool:
+        """Login to MT5 account.
+
+        Args:
+            username: MT5 account ID
+            password: MT5 account password
+            server: MT5 server name
+        """
+        if not self.connected:
+            return False
+
+        try:
+            return mt5.login(
+                login=int(username),
+                password=password,
+                server=server
+            )
+        except Exception as e:
+            print(f"MT5 login error: {e}")
+            return False
+
+    def get_account_info(self) -> Dict:
+        """Get current account information."""
+        if not self.connected:
+            return {}
+
+        try:
+            account = mt5.account_info()
+            if account is None:
+                return {}
+
+            return {
+                'balance': account.balance,
+                'equity': account.equity,
+                'profit': account.profit,
+                'margin': account.margin,
+                'margin_free': account.margin_free
+            }
+        except Exception as e:
+            print(f"Error getting account info: {e}")
+            return {}
+
+    def place_trade(self, symbol: str, order_type: str, volume: float,
+                   sl: Optional[float] = None, tp: Optional[float] = None) -> bool:
+        """Place a trade order.
+
+        Args:
+            symbol: Trading symbol (e.g. 'EURUSD')
+            order_type: 'BUY' or 'SELL'
+            volume: Trade volume in lots
+            sl: Stop loss price
+            tp: Take profit price
+        """
+        if not self.connected:
+            return False
+
+        try:
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'symbol': symbol,
+                'volume': volume,
+                'type': mt5.ORDER_TYPE_BUY if order_type == 'BUY' else mt5.ORDER_TYPE_SELL,
+                'price': mt5.symbol_info_tick(symbol).ask if order_type == 'BUY' else mt5.symbol_info_tick(symbol).bid,
+                'sl': sl,
+                'tp': tp,
+                'deviation': 10,
+                'magic': 234000,
+                'comment': 'ForexBot trade',
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC
+            }
+
+            result = mt5.order_send(request)
+            return result and result.retcode == mt5.TRADE_RETCODE_DONE
+
+        except Exception as e:
+            print(f"Error placing trade: {e}")
+            return False
+
+    def get_positions(self) -> List[Dict]:
+        """Get all open positions."""
+        if not self.connected:
+            return []
+
+        try:
+            positions = mt5.positions_get()
+            if positions is None:
+                return []
+
+            return [{
+                'ticket': p.ticket,
+                'symbol': p.symbol,
+                'type': 'BUY' if p.type == mt5.ORDER_TYPE_BUY else 'SELL',
+                'volume': p.volume,
+                'price': p.price_open,
+                'profit': p.profit,
+                'sl': p.sl,
+                'tp': p.tp
+            } for p in positions]
+
+        except Exception as e:
+            print(f"Error getting positions: {e}")
+            return []
+
+    def close_position(self, ticket: int) -> bool:
+        """Close a specific position.
+
+        Args:
+            ticket: Position ticket number
+        """
+        if not self.connected:
+            return False
+
+        try:
+            position = mt5.positions_get(ticket=ticket)
+            if not position:
+                return False
+
+            request = {
+                'action': mt5.TRADE_ACTION_DEAL,
+                'position': ticket,
+                'symbol': position[0].symbol,
+                'volume': position[0].volume,
+                'type': mt5.ORDER_TYPE_SELL if position[0].type == 0 else mt5.ORDER_TYPE_BUY,
+                'price': mt5.symbol_info_tick(position[0].symbol).bid if position[0].type == 0 else mt5.symbol_info_tick(position[0].symbol).ask,
+                'deviation': 10,
+                'magic': 234000,
+                'comment': 'ForexBot close',
+                'type_time': mt5.ORDER_TIME_GTC,
+                'type_filling': mt5.ORDER_FILLING_IOC
+            }
+
+            result = mt5.order_send(request)
+            return result and result.retcode == mt5.TRADE_RETCODE_DONE
+
+        except Exception as e:
+            print(f"Error closing position: {e}")
+            return False
+
+    def __del__(self):
+        """Clean up MT5 connection."""
+        if self.connected:
+            mt5.shutdown()
 ```
 
 ## Project Statistics
 
-- Total Files: 4
-- Text Files: 4
-- Binary Files: 0
-- Total Size: 22.05 KB
+- Total Files: 9
+- Text Files: 8
+- Binary Files: 1
+- Total Size: 31.76 KB

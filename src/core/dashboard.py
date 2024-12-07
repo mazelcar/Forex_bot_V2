@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Forex Trading Bot V2 - Dashboard
+Forex Trading Bot V2 - Dashboard.
 
 This module implements the critical monitoring dashboard for the trading system.
 The dashboard is a core component responsible for:
@@ -17,7 +17,7 @@ Created: December 2024
 
 import os
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 class Dashboard:
     """Critical system monitoring dashboard."""
@@ -79,8 +79,7 @@ class Dashboard:
         print("\nPress Ctrl+C to exit")
 
     def update(self, data: Dict) -> None:
-        """
-        Update the entire dashboard with new data.
+        """Update the entire dashboard with new data.
 
         Args:
             data: Dictionary containing all dashboard sections:
@@ -96,5 +95,5 @@ class Dashboard:
         self.render_market_status(data['market'])
         self.render_system_status(data['system'])
         self.render_footer()
-        
+
         self.last_update = datetime.now()
