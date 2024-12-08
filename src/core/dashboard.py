@@ -17,7 +17,7 @@ Created: December 2024
 
 import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 class Dashboard:
     """Critical system monitoring dashboard."""
@@ -25,6 +25,7 @@ class Dashboard:
     def __init__(self):
         """Initialize dashboard display."""
         self.last_update = None
+        self.log_level = 'INFO'  # Add this for debug support
 
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -42,9 +43,19 @@ class Dashboard:
         """Render account information section."""
         print("\nAccount Summary:")
         print("-" * 20)
-        print(f"Balance:     ${account_data['balance']:,.2f}")
-        print(f"Equity:      ${account_data['equity']:,.2f}")
-        print(f"Profit/Loss: ${account_data['profit']:,.2f}")
+        try:
+            print(f"Balance:     ${account_data.get('balance', 0):,.2f}")
+            print(f"Equity:      ${account_data.get('equity', 0):,.2f}")
+            print(f"Profit/Loss: ${account_data.get('profit', 0):,.2f}")
+            # Add more account info
+            if 'margin' in account_data:
+                print(f"Margin:      ${account_data['margin']:,.2f}")
+            if 'margin_free' in account_data:
+                print(f"Free Margin: ${account_data['margin_free']:,.2f}")
+        except Exception as e:
+            print("Error displaying account data")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 
     def render_positions(self, positions: List[Dict]):
         """Render open positions section."""
@@ -53,30 +64,48 @@ class Dashboard:
         if not positions:
             print("No open positions")
         else:
-            print(f"{'Symbol':<10} {'Type':<6} {'Profit':<10}")
-            print("-" * 30)
-            for pos in positions:
-                print(f"{pos['symbol']:<10} {pos['type']:<6} "
-                      f"${pos['profit']:,.2f}")
+            try:
+                print(f"{'Symbol':<10} {'Type':<6} {'Volume':<8} {'Profit':<10}")
+                print("-" * 40)
+                for pos in positions:
+                    volume = pos.get('volume', 0)
+                    print(f"{pos['symbol']:<10} {pos['type']:<6} "
+                          f"{volume:<8.2f} ${pos['profit']:,.2f}")
+            except Exception as e:
+                print("Error displaying positions")
+                if self.log_level == 'DEBUG':
+                    print(f"Error: {str(e)}")
 
     def render_market_status(self, market_data: Dict):
         """Render market status section."""
         print("\nMarket Status:")
         print("-" * 20)
-        print(f"Status:  {market_data['status']}")
-        print(f"Session: {market_data['session']}")
+        try:
+            print(f"Status:  {market_data.get('status', 'UNKNOWN')}")
+            print(f"Session: {market_data.get('session', 'UNKNOWN')}")
+        except Exception as e:
+            print("Error displaying market status")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 
     def render_system_status(self, system_data: Dict):
         """Render system status section."""
         print("\nSystem Status:")
         print("-" * 20)
-        print(f"MT5 Connection: {system_data['mt5_connection']}")
-        print(f"Signal System:  {system_data['signal_system']}")
-        print(f"Risk Manager:   {system_data['risk_manager']}")
+        try:
+            print(f"MT5 Connection: {system_data.get('mt5_connection', 'UNKNOWN')}")
+            print(f"Signal System:  {system_data.get('signal_system', 'UNKNOWN')}")
+            print(f"Risk Manager:   {system_data.get('risk_manager', 'UNKNOWN')}")
+        except Exception as e:
+            print("Error displaying system status")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 
     def render_footer(self):
         """Render dashboard footer."""
         print("\nPress Ctrl+C to exit")
+        if self.last_update:
+            print(f"Last Update: {self.last_update.strftime('%H:%M:%S')}")
 
     def update(self, data: Dict) -> None:
         """Update the entire dashboard with new data.
@@ -88,12 +117,16 @@ class Dashboard:
                 - market: Market status information
                 - system: System health information
         """
-        self.clear_screen()
-        self.render_header()
-        self.render_account(data['account'])
-        self.render_positions(data['positions'])
-        self.render_market_status(data['market'])
-        self.render_system_status(data['system'])
-        self.render_footer()
-
-        self.last_update = datetime.now()
+        try:
+            self.clear_screen()
+            self.render_header()
+            self.render_account(data.get('account', {}))
+            self.render_positions(data.get('positions', []))
+            self.render_market_status(data.get('market', {}))
+            self.render_system_status(data.get('system', {}))
+            self.render_footer()
+            self.last_update = datetime.now()
+        except Exception as e:
+            print("Dashboard update failed")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")

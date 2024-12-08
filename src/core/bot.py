@@ -24,102 +24,82 @@ Created: December 2024
 """
 
 import time
-from src.core.dashboard import Dashboard  # Fixed absolute import
+from src.core.dashboard import Dashboard
+from src.core.mt5 import MT5Handler
 
 
 class ForexBot:
-    """Core bot orchestrator for the trading system.
+   """Core bot orchestrator for the trading system.
 
-    This class serves as the main entry point for the Forex Trading Bot V2 system.
-    It is responsible for initializing the necessary components, running the main
-    bot loop, and handling shutdown and cleanup.
+   This class serves as the main entry point for the Forex Trading Bot V2 system.
+   It is responsible for initializing the necessary components, running the main
+   bot loop, and handling shutdown and cleanup.
 
-    Attributes:
-        mode (str): The operation mode of the bot ('auto' or 'manual').
-        running (bool): Flag indicating whether the bot is currently running.
-        dashboard (Dashboard): Instance of the dashboard component.
-        test_data (dict): Placeholder data for the bot's state.
-    """
+   Attributes:
+       mode (str): The operation mode of the bot ('auto' or 'manual').
+       running (bool): Flag indicating whether the bot is currently running.
+       dashboard (Dashboard): Instance of the dashboard component.
+       mt5_handler (MT5Handler): Instance of the MT5 handler component.
+   """
 
-    def __init__(self, mode: str = 'auto', debug: bool = False) -> None:
-        """Initialize the ForexBot with its configuration and components.
+   def __init__(self, mode: str = 'auto', debug: bool = False) -> None:
+       """Initialize the ForexBot with its configuration and components."""
+       self.mode = mode
+       self.running = False
+       self._setup_logging(debug)
 
-        Args:
-            mode (str): Operation mode ('auto' or 'manual').
-            debug (bool): Flag to enable debug-level logging.
-        """
-        self.mode = mode
-        self.running = False
-        self._setup_logging(debug)
+       # Initialize components
+       self.mt5_handler = MT5Handler(debug=debug)
+       self.dashboard = Dashboard()
 
-        # Initialize components
-        self.dashboard = Dashboard()
+   def _setup_logging(self, debug: bool) -> None:
+       """Set up logging configuration."""
+       if debug:
+           self.dashboard.log_level = 'DEBUG'
 
-        # Initialize placeholder data
-        self.test_data = {
-            'account': {
-                'balance': 10000.00,
-                'equity': 10000.00,
-                'profit': 0.00
-            },
-            'positions': [],
-            'market': {
-                'status': 'OPEN',
-                'session': 'London'
-            },
-            'system': {
-                'mt5_connection': 'OK',
-                'signal_system': 'OK',
-                'risk_manager': 'OK'
+   def run(self) -> None:
+    """Run the main bot execution loop."""
+    self.running = True
+
+    try:
+        while self.running:
+            # Get real data from MT5
+            market_status = self.mt5_handler.get_market_status()
+
+            real_data = {
+                'account': self.mt5_handler.get_account_info(),
+                'positions': self.mt5_handler.get_positions(),
+                'market': {
+                    'status': market_status['overall_status'],
+                    'session': ', '.join([
+                        market for market, is_open
+                        in market_status['status'].items()
+                        if is_open
+                    ]) or 'All Markets Closed'
+                },
+                'system': {
+                    'mt5_connection': 'OK' if self.mt5_handler.connected else 'ERROR',
+                    'signal_system': 'OK',  # Will be updated later
+                    'risk_manager': 'OK'  # Will be updated later
+                }
             }
-        }
 
-    def _setup_logging(self, debug: bool) -> None:
-        """Set up logging configuration.
+            # Update dashboard with current data
+            self.dashboard.update(real_data)
 
-        Args:
-            debug (bool): Enable debug logging if True.
-        """
-        if debug:
-            self.dashboard.log_level = 'DEBUG'
+            # Control update frequency
+            time.sleep(1)
 
-    def run(self) -> None:
-        """Run the main bot execution loop.
-
-        This method runs the central bot loop, which updates the bot's internal
-        state and the dashboard with the latest data. The loop continues until
-        the bot is explicitly stopped (e.g., by a keyboard interrupt).
-
-        The bot loop performs the following steps:
-        1. Update the bot's internal data (currently using placeholder data)
-        2. Update the dashboard with the current bot state
-        3. Control the update frequency by sleeping for 1 second
-
-        Raises:
-            KeyboardInterrupt: When the user interrupts the bot (e.g., Ctrl+C).
-        """
-        self.running = True
-
-        try:
-            while self.running:
-                # Update data (will be real data later)
-                self.test_data['positions'] = []  # No positions for now
-
-                # Update dashboard with current data
-                self.dashboard.update(self.test_data)
-
-                # Control update frequency
-                time.sleep(1)
-
-        except KeyboardInterrupt:
-            self.running = False
-        finally:
-            print("\nBot stopped")
-
-    def stop(self) -> None:
-        """Stop the bot execution gracefully.
-
-        This method provides a clean way to stop the bot's execution
-        from outside the main loop.
-        """
+    except KeyboardInterrupt:
         self.running = False
+    finally:
+        print("\nBot stopped")
+
+   def stop(self) -> None:
+       """Stop the bot execution gracefully."""
+       self.running = False
+
+   def __del__(self):
+       """Cleanup when bot is destroyed."""
+       if hasattr(self, 'mt5_handler'):
+           del self.mt5_handler

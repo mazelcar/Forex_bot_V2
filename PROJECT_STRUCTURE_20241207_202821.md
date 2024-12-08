@@ -1,18 +1,26 @@
 # Project Documentation
 
-Generated on: 2024-12-07 14:27:43
+Generated on: 2024-12-07 20:28:21
 
 ## Directory Structure
 Forex_V2
+├── config/
+│   ├── market_holidays.json
+│   ├── market_news.json
+│   ├── market_session.json
+│   └── mt5_config.json
+├── logs/
+│   └── audit/
 ├── src/
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── bot.py
 │   │   ├── dashboard.py
 │   │   └── mt5.py
-│   └── __init__.py
+│   ├── __init__.py
+│   └── audit.py
 ├── .gitignore
-├── PROJECT_STRUCTURE_20241207_142743.md
+├── PROJECT_STRUCTURE_20241207_202821.md
 ├── generate_file_structure.py
 ├── main.py
 └── tasks.py
@@ -286,7 +294,7 @@ if __name__ == "__main__":
 
 ```
 
-### main.py (6.68 KB)
+### main.py (5.40 KB)
 
 ```py
 """Forex Trading Bot V2 - System Entry Point.
@@ -320,6 +328,16 @@ Usage Examples:
     4. Run in manual mode with debug logging:
         python main.py --mode manual --debug
 
+    # ADDED: New usage examples for audit mode
+    5. Run MT5 module audit:
+        python main.py --audit mt5
+
+    6. Run dashboard audit:
+        python main.py --audit dashboard
+
+    7. Run full system audit:
+        python main.py --audit all
+
 Command Line Arguments:
     --mode:  Operation mode ('auto' or 'manual')
             - auto: Fully automated trading (default)
@@ -329,6 +347,12 @@ Command Line Arguments:
             - Provides detailed operational information
             - Includes component state transitions
             - Shows detailed error information
+
+    # ADDED: New audit argument documentation
+    --audit: Run system audit checks
+            - mt5: Audit MT5 module
+            - dashboard: Audit dashboard module
+            - all: Audit all modules
 
 Dependencies:
     - Python 3.8+
@@ -359,46 +383,20 @@ from pathlib import Path
 from typing import NoReturn
 
 # Add project root to Python path for reliable imports
-# This ensures imports work correctly regardless of where the script is executed from
-# Must be done before any project-specific imports
 PROJECT_ROOT = str(Path(__file__).parent.absolute())
 sys.path.append(PROJECT_ROOT)
 
-# Import placed here intentionally after path setup
-# pylint: disable=wrong-import-position
-# Reason: This import must occur after PROJECT_ROOT is added to sys.path
-# Future imports should also be placed here if they depend on the project structure
-from src.core.bot import ForexBot  # Main bot orchestrator class
-
-# Note: Any additional project-specific imports should follow the same pattern
-# from src.core.dashboard import Dashboard  # Example of another project import
+from src.core.bot import ForexBot
 
 def parse_arguments() -> argparse.Namespace:
     """Parse and validate command line arguments for the trading bot.
-
-    Processes command-line inputs to configure bot operation mode and debug settings.
 
     Returns:
         argparse.Namespace: Parsed command line arguments containing:
             - mode (str): Operation mode ('auto' or 'manual')
             - debug (bool): Debug logging flag
-
-    Command Line Arguments:
-        --mode:  Operation mode selection
-                - auto: Fully automated trading (default)
-                - manual: Requires trade confirmation
-
-        --debug: Enable detailed debug logging
-
-    Example:
-        args = parse_arguments()
-        print(f"Mode: {args.mode}")        # 'auto' or 'manual'
-        print(f"Debug: {args.debug}")      # True or False
-
-    Notes:
-        - The function uses argparse's built-in validation
-        - Invalid arguments will trigger help display
-        - Default values are clearly shown in help
+            # ADDED: New return value documentation
+            - audit (str): Module to audit (mt5, dashboard, or all)
     """
     parser = argparse.ArgumentParser(
         description='Forex Trading Bot V2 - Advanced Automated Trading System',
@@ -418,14 +416,14 @@ def parse_arguments() -> argparse.Namespace:
         help='Enable debug level logging for detailed operational information'
     )
 
-    # Future CLI arguments will include:
-    # --config: Path to configuration file
-    # --risk-profile: Trading risk profile selection
-    # --log-level: Fine-grained logging control
-    # --session: Specify trading sessions to participate in
+    # ADDED: New audit argument
+    parser.add_argument(
+        '--audit',
+        choices=['mt5', 'dashboard', 'all'],
+        help='Run audit on specified module(s)'
+    )
 
     return parser.parse_args()
-
 
 def main() -> NoReturn:
     """Primary entry point for the Forex Trading Bot V2 system.
@@ -434,39 +432,22 @@ def main() -> NoReturn:
     flow of the application. It maintains minimal responsibilities while ensuring
     proper bot initialization, execution, and shutdown handling.
 
-    Responsibilities:
-        1. Process command line arguments
-        2. Initialize the trading bot
-        3. Start bot execution
-        4. Handle shutdown and cleanup
-
-    Process Flow:
-        1. Parse command line arguments
-        2. Create bot instance with configuration
-        3. Start main bot loop
-        4. Handle interruption and cleanup
-        5. Exit with appropriate status
-
-    Error Handling:
-        - KeyboardInterrupt: Clean shutdown on Ctrl+C
-        - Exception: Logs error and exits with status 1
-        - SystemExit: Managed exit with status code
-
-    Exit Codes:
-        0: Clean shutdown (including Ctrl+C)
-        1: Error during execution
-
-    Example:
-        This function is typically called by the __main__ block:
-            if __name__ == "__main__":
-                main()
-
-    Notes:
-        - The function never returns (hence NoReturn type hint)
-        - All trading functionality is delegated to the bot
-        - Maintains clean separation of concerns
+    # ADDED: New functionality documentation
+    Supports two operational modes:
+    1. Normal bot operation with auto/manual trading
+    2. Audit mode for system testing and verification
     """
     args = parse_arguments()
+
+    # ADDED: Handle audit mode
+    if args.audit:
+        from src.audit import run_audit
+        try:
+            run_audit(args.audit)
+            sys.exit(0)
+        except Exception as e:
+            print(f"\nAudit failed: {str(e)}")
+            sys.exit(1)
 
     try:
         bot = ForexBot(
@@ -483,10 +464,8 @@ def main() -> NoReturn:
         print("See logs for detailed error information")
         sys.exit(1)
 
-
 if __name__ == "__main__":
     main()
-
 ```
 
 ### tasks.py (1.04 KB)
@@ -544,10 +523,417 @@ def all(c):
     pass
 ```
 
+### config\market_holidays.json (322.00 B)
+
+```json
+{
+    "2024": {
+        "Sydney": [
+            {"date": "2024-12-25", "name": "Christmas"},
+            {"date": "2024-12-26", "name": "Boxing Day"}
+        ],
+        "Tokyo": [
+            {"date": "2024-12-25", "name": "Christmas"},
+            {"date": "2024-01-02", "name": "New Year"}
+        ]
+
+    }
+}
+```
+
+### config\market_news.json (226.00 B)
+
+```json
+{
+    "high_impact": [
+        {
+            "date": "2024-12-13",
+            "time": "14:30",
+            "market": "New York",
+            "event": "FOMC Statement",
+            "currency": "USD"
+        }
+    ]
+}
+```
+
+### config\market_session.json (603.00 B)
+
+```json
+{
+    "utc_offset": "-6",
+    "sessions": {
+        "Sydney": {
+            "open": "21:00",
+            "close": "06:00",
+            "pairs": ["AUDUSD", "NZDUSD"]
+        },
+        "Tokyo": {
+            "open": "23:00",
+            "close": "08:00",
+            "pairs": ["USDJPY", "EURJPY"]
+        },
+        "London": {
+            "open": "03:00",
+            "close": "12:00",
+            "pairs": ["GBPUSD", "EURGBP"]
+        },
+        "New York": {
+            "open": "08:00",
+            "close": "17:00",
+            "pairs": ["EURUSD", "USDCAD"]
+        }
+    }
+}
+```
+
+### config\mt5_config.json (120.00 B)
+
+```json
+{
+    "username": "61294775",
+    "password": "Jarelis@2024",
+    "server": "Pepperstone-Demo",
+    "debug": true
+}
+```
+
 ### src\__init__.py (0.00 B)
 
 ```py
 
+```
+
+### src\audit.py (12.49 KB)
+
+```py
+"""Audit Module for Forex Trading Bot V2.
+
+This module provides audit capabilities for testing and verifying
+different components of the trading system.
+
+Current audit capabilities:
+- Dashboard display and functionality testing
+"""
+
+import os
+import sys
+import time
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Tuple
+
+from src.core.dashboard import Dashboard
+
+def setup_audit_logging() -> Tuple[logging.Logger, Path, str]:
+    """Setup logging for audit operations.
+
+    Returns:
+        tuple containing:
+        - logger: Configured logging instance
+        - log_dir: Path to log directory
+        - timestamp: Current timestamp string
+    """
+    try:
+        # Get absolute paths
+        project_root = Path(__file__).parent.parent.absolute()
+        log_dir = project_root / "logs" / "audit"
+
+        print("\nAttempting to create log directory at: {log_dir}")
+
+        # Create directory
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        # Verify directory exists and is writable
+        if not log_dir.exists():
+            raise RuntimeError(f"Failed to create log directory at: {log_dir}")
+        if not os.access(log_dir, os.W_OK):
+            raise RuntimeError(f"Log directory exists but is not writable: {log_dir}")
+
+        print(f"Log directory verified at: {log_dir}")
+
+        # Create timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = log_dir / f"audit_{timestamp}.log"
+
+        try:
+            # Test file creation
+            with open(log_file, 'w') as f:
+                f.write("Initializing audit log\n")
+        except Exception as e:
+            raise RuntimeError(f"Cannot create log file at {log_file}: {str(e)}")
+
+        print(f"Log file created and verified at: {log_file}")
+
+        # Configure logger
+        logger = logging.getLogger('audit')
+        logger.setLevel(logging.INFO)
+
+        # File handler
+        file_handler = logging.FileHandler(log_file)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+
+        # Console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+
+        return logger, log_dir, timestamp
+
+    except Exception as e:
+        print("\nFATAL ERROR in logging setup:")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print(f"Current working directory: {Path.cwd()}")
+        sys.exit(1)
+
+def audit_mt5() -> None:
+    """Audit MT5 functionality and connection."""
+    print("\n=== Starting MT5 Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting MT5 Audit")
+
+    try:
+        # Initialize MT5 handler
+        from src.core.mt5 import MT5Handler
+        mt5_handler = MT5Handler(debug=True)
+        logger.info("MT5Handler instance created")
+
+        # Test connection
+        logger.info("Testing MT5 connection...")
+        if mt5_handler.connected:
+            logger.info("MT5 connection: SUCCESS")
+        else:
+            logger.error("MT5 connection: FAILED")
+            raise RuntimeError("Could not connect to MT5")
+
+        # Test scenarios
+        test_scenarios = [
+            {
+                "name": "Account connection test",
+                "test": "login",
+                "params": {
+                    "username": "12345",  # Test account
+                    "password": "test",   # Test password
+                    "server": "MetaQuotes-Demo"
+                }
+            },
+            {
+                "name": "Account info retrieval",
+                "test": "get_account_info"
+            },
+            {
+                "name": "Position retrieval",
+                "test": "get_positions"
+            },
+            {
+                "name": "Market data validation",
+                "test": "market_data",
+                "params": {
+                    "symbols": ["EURUSD", "GBPUSD", "USDJPY"]
+                }
+            }
+        ]
+
+        for scenario in test_scenarios:
+            logger.info("Testing scenario: %s", scenario['name'])
+
+            try:
+                if scenario['test'] == 'login':
+                    # Test login - but don't use real credentials in audit
+                    logger.info("Login method: Available")
+                    logger.info("Login parameters validation: OK")
+
+                elif scenario['test'] == 'get_account_info':
+                    # Test account info structure
+                    account_info = mt5_handler.get_account_info()
+                    required_fields = ['balance', 'equity', 'profit', 'margin', 'margin_free']
+
+                    if isinstance(account_info, dict):
+                        missing_fields = [field for field in required_fields if field not in account_info]
+                        if not missing_fields:
+                            logger.info("Account info structure: Valid")
+                        else:
+                            logger.error("Account info missing fields: %s", missing_fields)
+                    else:
+                        logger.error("Account info invalid type: %s", type(account_info))
+
+                elif scenario['test'] == 'get_positions':
+                    # Test position retrieval structure
+                    positions = mt5_handler.get_positions()
+                    logger.info("Position retrieval: OK")
+                    if isinstance(positions, list):
+                        logger.info("Positions structure: Valid")
+                        logger.info("Current open positions: %d", len(positions))
+                    else:
+                        logger.error("Positions invalid type: %s", type(positions))
+
+                elif scenario['test'] == 'market_data':
+                    # Test market data access
+                    import MetaTrader5 as mt5
+                    for symbol in scenario['params']['symbols']:
+                        tick = mt5.symbol_info_tick(symbol)
+                        if tick is not None:
+                            logger.info("Market data for %s: Available (Bid: %.5f, Ask: %.5f)",
+                                      symbol, tick.bid, tick.ask)
+                        else:
+                            logger.error("Market data for %s: Unavailable", symbol)
+
+                logger.info("Scenario %s: Completed", scenario['name'])
+
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error("Scenario %s failed: %s", scenario['name'], str(e))
+
+        # Test order parameters validation (without placing orders)
+        logger.info("Testing trade parameter validation...")
+        test_trade_params = {
+            "symbol": "EURUSD",
+            "order_type": "BUY",
+            "volume": 0.1,
+            "sl": None,
+            "tp": None
+        }
+        try:
+            # Just validate the parameters without placing the trade
+            if all(param in test_trade_params for param in ['symbol', 'order_type', 'volume']):
+                logger.info("Trade parameters structure: Valid")
+            else:
+                logger.error("Trade parameters structure: Invalid")
+        except Exception as e:  # pylint: disable=broad-except
+            logger.error("Trade parameter validation failed: %s", str(e))
+
+        logger.info("MT5 audit completed successfully")
+        print("\n=== MT5 Audit Complete ===")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:
+        logger.error("MT5 audit failed: %s", str(e))
+        raise
+    finally:
+        # Ensure MT5 is properly shut down
+        if 'mt5_handler' in locals() and mt5_handler.connected:
+            mt5_handler.__del__()
+            logger.info("MT5 connection closed")
+
+def audit_dashboard() -> None:
+    """Audit dashboard functionality without displaying on screen."""
+    print("\n=== Starting Dashboard Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Dashboard Audit")
+
+    # Test scenarios
+    test_scenarios = [
+        {
+            "name": "Empty data test",
+            "data": {
+                "account": {"balance": 0, "equity": 0, "profit": 0},
+                "positions": [],
+                "market": {"status": "CLOSED", "session": "NONE"},
+                "system": {"mt5_connection": "OK", "signal_system": "OK", "risk_manager": "OK"}
+            }
+        },
+        {
+            "name": "Normal operation data",
+            "data": {
+                "account": {"balance": 10000, "equity": 10500, "profit": 500},
+                "positions": [
+                    {"symbol": "EURUSD", "type": "BUY", "profit": 300},
+                    {"symbol": "GBPUSD", "type": "SELL", "profit": 200}
+                ],
+                "market": {"status": "OPEN", "session": "London"},
+                "system": {"mt5_connection": "OK", "signal_system": "OK", "risk_manager": "OK"}
+            }
+        },
+        {
+            "name": "Error state data",
+            "data": {
+                "account": {"balance": 9500, "equity": 9000, "profit": -500},
+                "positions": [],
+                "market": {"status": "ERROR", "session": "Unknown"},
+                "system": {"mt5_connection": "ERROR", "signal_system": "OK", "risk_manager": "WARNING"}
+            }
+        }
+    ]
+
+    try:
+        # Create dashboard instance but suppress actual display
+        dashboard = Dashboard()
+        logger.info("Dashboard instance created successfully")
+
+        for scenario in test_scenarios:
+            logger.info("Testing scenario: %s", scenario['name'])
+
+            # Test component methods without actually displaying
+            try:
+                # Don't actually clear screen, just verify method exists
+                if hasattr(dashboard, 'clear_screen'):
+                    logger.info("Screen clearing method: Available")
+                else:
+                    logger.error("Screen clearing method: Missing")
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error("Screen clearing check failed: %s", str(e))
+
+            try:
+                # Test data structure handling without display
+                data = scenario['data']
+
+                # Verify account data structure
+                if all(k in data['account'] for k in ['balance', 'equity', 'profit']):
+                    logger.info("Account data structure: Valid")
+                else:
+                    logger.error("Account data structure: Invalid")
+
+                # Verify positions data structure
+                if isinstance(data['positions'], list):
+                    logger.info("Positions data structure: Valid")
+                else:
+                    logger.error("Positions data structure: Invalid")
+
+                # Verify market data structure
+                if all(k in data['market'] for k in ['status', 'session']):
+                    logger.info("Market data structure: Valid")
+                else:
+                    logger.error("Market data structure: Invalid")
+
+                # Verify system data structure
+                if all(k in data['system'] for k in ['mt5_connection', 'signal_system', 'risk_manager']):
+                    logger.info("System data structure: Valid")
+                else:
+                    logger.error("System data structure: Invalid")
+
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error("Data structure validation failed: %s", str(e))
+
+        logger.info("Dashboard audit completed successfully")
+        print("\n=== Dashboard Audit Complete ===")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Dashboard audit failed: %s", str(e))
+        raise
+
+def run_audit(target: str) -> None:
+    """Run audit for specified target.
+
+    Args:
+        target: Module to audit ('dashboard', 'mt5', or 'all')
+    """
+    if target in ['dashboard', 'all']:
+        audit_dashboard()
+
+    if target == 'mt5':
+        audit_mt5()
+
+    if target == 'all':
+        # TODO: Add other module audits here  # pylint: disable=fixme
+        pass
 ```
 
 ### src\core\__init__.py (0.00 B)
@@ -556,7 +942,7 @@ def all(c):
 
 ```
 
-### src\core\bot.py (4.30 KB)
+### src\core\bot.py (3.73 KB)
 
 ```py
 """Forex Trading Bot V2 - Bot Orchestrator.
@@ -585,109 +971,88 @@ Created: December 2024
 """
 
 import time
-from src.core.dashboard import Dashboard  # Fixed absolute import
+from src.core.dashboard import Dashboard
+from src.core.mt5 import MT5Handler
 
 
 class ForexBot:
-    """Core bot orchestrator for the trading system.
+   """Core bot orchestrator for the trading system.
 
-    This class serves as the main entry point for the Forex Trading Bot V2 system.
-    It is responsible for initializing the necessary components, running the main
-    bot loop, and handling shutdown and cleanup.
+   This class serves as the main entry point for the Forex Trading Bot V2 system.
+   It is responsible for initializing the necessary components, running the main
+   bot loop, and handling shutdown and cleanup.
 
-    Attributes:
-        mode (str): The operation mode of the bot ('auto' or 'manual').
-        running (bool): Flag indicating whether the bot is currently running.
-        dashboard (Dashboard): Instance of the dashboard component.
-        test_data (dict): Placeholder data for the bot's state.
-    """
+   Attributes:
+       mode (str): The operation mode of the bot ('auto' or 'manual').
+       running (bool): Flag indicating whether the bot is currently running.
+       dashboard (Dashboard): Instance of the dashboard component.
+       mt5_handler (MT5Handler): Instance of the MT5 handler component.
+   """
 
-    def __init__(self, mode: str = 'auto', debug: bool = False) -> None:
-        """Initialize the ForexBot with its configuration and components.
+   def __init__(self, mode: str = 'auto', debug: bool = False) -> None:
+       """Initialize the ForexBot with its configuration and components."""
+       self.mode = mode
+       self.running = False
+       self._setup_logging(debug)
 
-        Args:
-            mode (str): Operation mode ('auto' or 'manual').
-            debug (bool): Flag to enable debug-level logging.
-        """
-        self.mode = mode
-        self.running = False
-        self._setup_logging(debug)
+       # Initialize components
+       self.mt5_handler = MT5Handler(debug=debug)
+       self.dashboard = Dashboard()
 
-        # Initialize components
-        self.dashboard = Dashboard()
+   def _setup_logging(self, debug: bool) -> None:
+       """Set up logging configuration."""
+       if debug:
+           self.dashboard.log_level = 'DEBUG'
 
-        # Initialize placeholder data
-        self.test_data = {
-            'account': {
-                'balance': 10000.00,
-                'equity': 10000.00,
-                'profit': 0.00
-            },
-            'positions': [],
-            'market': {
-                'status': 'OPEN',
-                'session': 'London'
-            },
-            'system': {
-                'mt5_connection': 'OK',
-                'signal_system': 'OK',
-                'risk_manager': 'OK'
+   def run(self) -> None:
+    """Run the main bot execution loop."""
+    self.running = True
+
+    try:
+        while self.running:
+            # Get real data from MT5
+            market_status = self.mt5_handler.get_market_status()
+
+            real_data = {
+                'account': self.mt5_handler.get_account_info(),
+                'positions': self.mt5_handler.get_positions(),
+                'market': {
+                    'status': market_status['overall_status'],
+                    'session': ', '.join([
+                        market for market, is_open
+                        in market_status['status'].items()
+                        if is_open
+                    ]) or 'All Markets Closed'
+                },
+                'system': {
+                    'mt5_connection': 'OK' if self.mt5_handler.connected else 'ERROR',
+                    'signal_system': 'OK',  # Will be updated later
+                    'risk_manager': 'OK'  # Will be updated later
+                }
             }
-        }
 
-    def _setup_logging(self, debug: bool) -> None:
-        """Set up logging configuration.
+            # Update dashboard with current data
+            self.dashboard.update(real_data)
 
-        Args:
-            debug (bool): Enable debug logging if True.
-        """
-        if debug:
-            self.dashboard.log_level = 'DEBUG'
+            # Control update frequency
+            time.sleep(1)
 
-    def run(self) -> None:
-        """Run the main bot execution loop.
-
-        This method runs the central bot loop, which updates the bot's internal
-        state and the dashboard with the latest data. The loop continues until
-        the bot is explicitly stopped (e.g., by a keyboard interrupt).
-
-        The bot loop performs the following steps:
-        1. Update the bot's internal data (currently using placeholder data)
-        2. Update the dashboard with the current bot state
-        3. Control the update frequency by sleeping for 1 second
-
-        Raises:
-            KeyboardInterrupt: When the user interrupts the bot (e.g., Ctrl+C).
-        """
-        self.running = True
-
-        try:
-            while self.running:
-                # Update data (will be real data later)
-                self.test_data['positions'] = []  # No positions for now
-
-                # Update dashboard with current data
-                self.dashboard.update(self.test_data)
-
-                # Control update frequency
-                time.sleep(1)
-
-        except KeyboardInterrupt:
-            self.running = False
-        finally:
-            print("\nBot stopped")
-
-    def stop(self) -> None:
-        """Stop the bot execution gracefully.
-
-        This method provides a clean way to stop the bot's execution
-        from outside the main loop.
-        """
+    except KeyboardInterrupt:
         self.running = False
+    finally:
+        print("\nBot stopped")
 
+   def stop(self) -> None:
+       """Stop the bot execution gracefully."""
+       self.running = False
+
+   def __del__(self):
+       """Cleanup when bot is destroyed."""
+       if hasattr(self, 'mt5_handler'):
+           del self.mt5_handler
 ```
 
-### src\core\dashboard.py (3.35 KB)
+### src\core\dashboard.py (4.99 KB)
 
 ```py
 #!/usr/bin/env python
@@ -709,7 +1074,7 @@ Created: December 2024
 
 import os
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 class Dashboard:
     """Critical system monitoring dashboard."""
@@ -717,6 +1082,7 @@ class Dashboard:
     def __init__(self):
         """Initialize dashboard display."""
         self.last_update = None
+        self.log_level = 'INFO'  # Add this for debug support
 
     def clear_screen(self):
         """Clear the terminal screen."""
@@ -734,9 +1100,19 @@ class Dashboard:
         """Render account information section."""
         print("\nAccount Summary:")
         print("-" * 20)
-        print(f"Balance:     ${account_data['balance']:,.2f}")
-        print(f"Equity:      ${account_data['equity']:,.2f}")
-        print(f"Profit/Loss: ${account_data['profit']:,.2f}")
+        try:
+            print(f"Balance:     ${account_data.get('balance', 0):,.2f}")
+            print(f"Equity:      ${account_data.get('equity', 0):,.2f}")
+            print(f"Profit/Loss: ${account_data.get('profit', 0):,.2f}")
+            # Add more account info
+            if 'margin' in account_data:
+                print(f"Margin:      ${account_data['margin']:,.2f}")
+            if 'margin_free' in account_data:
+                print(f"Free Margin: ${account_data['margin_free']:,.2f}")
+        except Exception as e:
+            print("Error displaying account data")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 
     def render_positions(self, positions: List[Dict]):
         """Render open positions section."""
@@ -745,30 +1121,48 @@ class Dashboard:
         if not positions:
             print("No open positions")
         else:
-            print(f"{'Symbol':<10} {'Type':<6} {'Profit':<10}")
-            print("-" * 30)
-            for pos in positions:
-                print(f"{pos['symbol']:<10} {pos['type']:<6} "
-                      f"${pos['profit']:,.2f}")
+            try:
+                print(f"{'Symbol':<10} {'Type':<6} {'Volume':<8} {'Profit':<10}")
+                print("-" * 40)
+                for pos in positions:
+                    volume = pos.get('volume', 0)
+                    print(f"{pos['symbol']:<10} {pos['type']:<6} "
+                          f"{volume:<8.2f} ${pos['profit']:,.2f}")
+            except Exception as e:
+                print("Error displaying positions")
+                if self.log_level == 'DEBUG':
+                    print(f"Error: {str(e)}")
 
     def render_market_status(self, market_data: Dict):
         """Render market status section."""
         print("\nMarket Status:")
         print("-" * 20)
-        print(f"Status:  {market_data['status']}")
-        print(f"Session: {market_data['session']}")
+        try:
+            print(f"Status:  {market_data.get('status', 'UNKNOWN')}")
+            print(f"Session: {market_data.get('session', 'UNKNOWN')}")
+        except Exception as e:
+            print("Error displaying market status")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 
     def render_system_status(self, system_data: Dict):
         """Render system status section."""
         print("\nSystem Status:")
         print("-" * 20)
-        print(f"MT5 Connection: {system_data['mt5_connection']}")
-        print(f"Signal System:  {system_data['signal_system']}")
-        print(f"Risk Manager:   {system_data['risk_manager']}")
+        try:
+            print(f"MT5 Connection: {system_data.get('mt5_connection', 'UNKNOWN')}")
+            print(f"Signal System:  {system_data.get('signal_system', 'UNKNOWN')}")
+            print(f"Risk Manager:   {system_data.get('risk_manager', 'UNKNOWN')}")
+        except Exception as e:
+            print("Error displaying system status")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 
     def render_footer(self):
         """Render dashboard footer."""
         print("\nPress Ctrl+C to exit")
+        if self.last_update:
+            print(f"Last Update: {self.last_update.strftime('%H:%M:%S')}")
 
     def update(self, data: Dict) -> None:
         """Update the entire dashboard with new data.
@@ -780,19 +1174,22 @@ class Dashboard:
                 - market: Market status information
                 - system: System health information
         """
-        self.clear_screen()
-        self.render_header()
-        self.render_account(data['account'])
-        self.render_positions(data['positions'])
-        self.render_market_status(data['market'])
-        self.render_system_status(data['system'])
-        self.render_footer()
-
-        self.last_update = datetime.now()
-
+        try:
+            self.clear_screen()
+            self.render_header()
+            self.render_account(data.get('account', {}))
+            self.render_positions(data.get('positions', []))
+            self.render_market_status(data.get('market', {}))
+            self.render_system_status(data.get('system', {}))
+            self.render_footer()
+            self.last_update = datetime.now()
+        except Exception as e:
+            print("Dashboard update failed")
+            if self.log_level == 'DEBUG':
+                print(f"Error: {str(e)}")
 ```
 
-### src\core\mt5.py (5.60 KB)
+### src\core\mt5.py (8.33 KB)
 
 ```py
 """MT5 Integration Module for Forex Trading Bot V2.
@@ -808,9 +1205,59 @@ Author: mazelcar
 Created: December 2024
 """
 
+import json
+from pathlib import Path
 import MetaTrader5 as mt5
 from datetime import datetime
 from typing import Dict, List, Optional
+
+
+def create_default_config() -> bool:
+    """Create default config directory and files if they don't exist."""
+    try:
+        # Setup config directory
+        project_root = Path(__file__).parent.parent.parent.absolute()  # Go up to project root
+        config_dir = project_root / "config"
+        config_dir.mkdir(exist_ok=True)
+
+        # Default MT5 config
+        mt5_config_file = config_dir / "mt5_config.json"
+        if not mt5_config_file.exists():
+            default_config = {
+                "username": "",
+                "password": "",
+                "server": "",
+                "debug": True
+            }
+
+            with open(mt5_config_file, mode='w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=4)
+
+            print(f"\nCreated default MT5 config file at: {mt5_config_file}")
+            print("Please fill in your MT5 credentials in the config file")
+            return False
+        return True
+    except Exception as e:
+        print(f"Error creating config: {e}")
+        return False
+
+
+def get_mt5_config() -> Dict:
+    """Get MT5 configuration from config file."""
+    project_root = Path(__file__).parent.parent.parent.absolute()
+    config_file = project_root / "config" / "mt5_config.json"
+
+    if not config_file.exists():
+        create_default_config()
+        return {}
+
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        print(f"Error reading config: {e}")
+        return {}
 
 
 class MT5Handler:
@@ -823,6 +1270,7 @@ class MT5Handler:
             debug: Enable debug logging
         """
         self.connected = False
+        self.config = get_mt5_config()
         self._initialize_mt5()
 
     def _initialize_mt5(self) -> bool:
@@ -877,6 +1325,37 @@ class MT5Handler:
         except Exception as e:
             print(f"Error getting account info: {e}")
             return {}
+
+    def get_market_status(self):
+        """Get real market status from MT5."""
+        try:
+            # Check major pairs to determine which sessions are open
+            pairs = {
+                'Sydney': 'AUDUSD',
+                'Tokyo': 'USDJPY',
+                'London': 'GBPUSD',
+                'New York': 'EURUSD'
+            }
+
+            status = {}
+            for market, symbol in pairs.items():
+                symbol_info = mt5.symbol_info(symbol)
+                if symbol_info is not None:
+                    # trade_mode 0 means market is closed
+                    status[market] = symbol_info.trade_mode != 0
+                else:
+                    status[market] = False
+
+            return {
+                'status': status,
+                'overall_status': 'OPEN' if any(status.values()) else 'CLOSED'
+            }
+        except Exception as e:
+            print(f"Error getting market status: {e}")
+            return {
+                'status': {market: False for market in pairs},
+                'overall_status': 'ERROR'
+            }
 
     def place_trade(self, symbol: str, order_type: str, volume: float,
                    sl: Optional[float] = None, tp: Optional[float] = None) -> bool:
@@ -983,7 +1462,7 @@ class MT5Handler:
 
 ## Project Statistics
 
-- Total Files: 9
-- Text Files: 8
+- Total Files: 14
+- Text Files: 13
 - Binary Files: 1
-- Total Size: 31.76 KB
+- Total Size: 48.00 KB

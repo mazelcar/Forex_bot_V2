@@ -11,9 +11,60 @@ Author: mazelcar
 Created: December 2024
 """
 
+import json
+from pathlib import Path
 import MetaTrader5 as mt5
 from datetime import datetime
 from typing import Dict, List, Optional
+from src.core.market_sessions import MarketSessionManager
+
+
+def create_default_config() -> bool:
+    """Create default config directory and files if they don't exist."""
+    try:
+        # Setup config directory
+        project_root = Path(__file__).parent.parent.parent.absolute()  # Go up to project root
+        config_dir = project_root / "config"
+        config_dir.mkdir(exist_ok=True)
+
+        # Default MT5 config
+        mt5_config_file = config_dir / "mt5_config.json"
+        if not mt5_config_file.exists():
+            default_config = {
+                "username": "",
+                "password": "",
+                "server": "",
+                "debug": True
+            }
+
+            with open(mt5_config_file, mode='w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=4)
+
+            print(f"\nCreated default MT5 config file at: {mt5_config_file}")
+            print("Please fill in your MT5 credentials in the config file")
+            return False
+        return True
+    except Exception as e:
+        print(f"Error creating config: {e}")
+        return False
+
+
+def get_mt5_config() -> Dict:
+    """Get MT5 configuration from config file."""
+    project_root = Path(__file__).parent.parent.parent.absolute()
+    config_file = project_root / "config" / "mt5_config.json"
+
+    if not config_file.exists():
+        create_default_config()
+        return {}
+
+    try:
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+        return config
+    except Exception as e:
+        print(f"Error reading config: {e}")
+        return {}
 
 
 class MT5Handler:
@@ -26,7 +77,9 @@ class MT5Handler:
             debug: Enable debug logging
         """
         self.connected = False
+        self.config = get_mt5_config()
         self._initialize_mt5()
+        self.session_manager = MarketSessionManager()
 
     def _initialize_mt5(self) -> bool:
         """Connect to MT5 terminal."""
@@ -80,6 +133,30 @@ class MT5Handler:
         except Exception as e:
             print(f"Error getting account info: {e}")
             return {}
+
+    def get_market_status(self) -> Dict:
+        """Get market status considering both MT5 and session times."""
+        session_status = self.session_manager.get_status()
+
+        # Cross-reference with MT5 symbols
+        try:
+            for market, info in self.session_manager.sessions['sessions'].items():
+                # Check if any pair for this session is tradeable
+                pairs = info.get('pairs', [])
+                market_tradeable = any(
+                    mt5.symbol_info(pair).trade_mode != 0
+                    for pair in pairs
+                    if mt5.symbol_info(pair) is not None
+                )
+                # Market is only open if both session time and MT5 allow trading
+                session_status['status'][market] &= market_tradeable
+
+            session_status['overall_status'] = 'OPEN' if any(session_status['status'].values()) else 'CLOSED'
+
+        except Exception as e:
+            print(f"Error checking MT5 market status: {e}")
+
+        return session_status
 
     def place_trade(self, symbol: str, order_type: str, volume: float,
                    sl: Optional[float] = None, tp: Optional[float] = None) -> bool:

@@ -1,0 +1,13 @@
+{
+    "2024": {
+        "Sydney": [
+            {"date": "2024-12-25", "name": "Christmas"},
+            {"date": "2024-12-26", "name": "Boxing Day"}
+        ],
+        "Tokyo": [
+            {"date": "2024-12-25", "name": "Christmas"},
+            {"date": "2024-01-02", "name": "New Year"}
+        ]
+
+    }
+}
