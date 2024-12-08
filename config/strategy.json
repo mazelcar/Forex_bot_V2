@@ -1,0 +1,273 @@
+{
+    "strategy_name": "MA_RSI_Volume_Scalping",
+    "description": "Advanced scalping strategy for forex using dynamic EMA crossover with adaptive RSI confirmation and smart volume analysis. Optimized for short-term trades on major forex pairs with automatic market condition adaptation.",
+
+    "market_scope": {
+        "type": "forex",
+        "pairs": ["EURUSD", "GBPUSD", "USDJPY"],
+        "timeframes": ["M5", "M15"]
+    },
+
+    "indicators": {
+        "moving_averages": {
+            "fast_ma": {
+                "type": "EMA",
+                "period": 8,
+                "source": "close",
+                "dynamic_adjustment": {
+                    "enabled": true,
+                    "volatility_based": {
+                        "high_volatility": 5,
+                        "normal_volatility": 8,
+                        "low_volatility": 13
+                    }
+                }
+            },
+            "slow_ma": {
+                "type": "EMA",
+                "period": 21,
+                "source": "close",
+                "dynamic_adjustment": {
+                    "enabled": true,
+                    "volatility_based": {
+                        "high_volatility": 13,
+                        "normal_volatility": 21,
+                        "low_volatility": 34
+                    }
+                }
+            }
+        },
+        "rsi": {
+            "period": 14,
+            "source": "close",
+            "dynamic_levels": {
+                "center_line": {
+                    "base": 50,
+                    "dynamic_adjustment": true,
+                    "adjustment_range": 5,
+                    "market_condition_modifiers": {
+                        "trend_strength": [-3, 3],
+                        "volatility": [-2, 2],
+                        "volume_impact": [-2, 2]
+                    }
+                },
+                "extreme_levels": {
+                    "base_overbought": 70,
+                    "base_oversold": 30,
+                    "dynamic_adjustment": true,
+                    "adjustment_range": 5
+                }
+            }
+        },
+        "volume": {
+            "period": 20,
+            "volume_ma": {
+                "type": "SMA",
+                "period": 20
+            },
+            "dynamic_thresholds": {
+                "enabled": true,
+                "calculation": "standard_deviation",
+                "lookback_periods": 100,
+                "threshold_multipliers": {
+                    "high": 2.0,
+                    "medium": 1.5,
+                    "low": 1.2
+                }
+            }
+        }
+    },
+
+    "market_context": {
+        "volatility_measurement": {
+            "primary": "ATR",
+            "period": 14,
+            "thresholds": {
+                "high": 15,
+                "normal": [5, 15],
+                "low": 5
+            }
+        },
+        "pre_news_buffer": {
+            "enabled": true,
+            "buffer_minutes": {
+                "high_impact": 30,
+                "medium_impact": 15,
+                "low_impact": 5
+            }
+        },
+        "session_volume_profile": {
+            "enabled": true,
+            "measurement_period": "1H",
+            "min_volume_threshold": {
+                "type": "percentile",
+                "value": 25
+            }
+        }
+    },
+
+    "signal_conditions": {
+        "buy": {
+            "primary": {
+                "condition": "CROSS_ABOVE",
+                "indicator1": "fast_ma",
+                "indicator2": "slow_ma",
+                "confirmation_rules": {
+                    "minimum_cross_strength": 0.5,
+                    "minimum_separation": "dynamic"
+                }
+            },
+            "confirmations": [
+                {
+                    "indicator": "rsi",
+                    "condition": "DYNAMIC_RANGE",
+                    "base_value": 50,
+                    "dynamic_adjustment": true,
+                    "required": true
+                },
+                {
+                    "indicator": "volume",
+                    "condition": "GREATER_THAN",
+                    "value": "dynamic_threshold",
+                    "required": true
+                }
+            ]
+        },
+        "sell": {
+            "primary": {
+                "condition": "CROSS_BELOW",
+                "indicator1": "fast_ma",
+                "indicator2": "slow_ma",
+                "confirmation_rules": {
+                    "minimum_cross_strength": 0.5,
+                    "minimum_separation": "dynamic"
+                }
+            },
+            "confirmations": [
+                {
+                    "indicator": "rsi",
+                    "condition": "DYNAMIC_RANGE",
+                    "base_value": 50,
+                    "dynamic_adjustment": true,
+                    "required": true
+                },
+                {
+                    "indicator": "volume",
+                    "condition": "GREATER_THAN",
+                    "value": "dynamic_threshold",
+                    "required": true
+                }
+            ]
+        }
+    },
+
+    "filters": {
+        "spread": {
+            "max_spread_pips": 3,
+            "dynamic_adjustment": {
+                "enabled": true,
+                "volatility_based": true,
+                "max_adjustment": 2
+            }
+        },
+        "market_volatility": {
+            "atr_based": {
+                "period": 14,
+                "dynamic_thresholds": {
+                    "enabled": true,
+                    "calculation_method": "percentile_range",
+                    "lookback_periods": 100
+                }
+            }
+        }
+    },
+
+    "signal_strength": {
+        "levels": {
+            "strong": {
+                "ema_conditions": {
+                    "min_separation_pips": "dynamic",
+                    "price_distance_pips": "dynamic",
+                    "angle_threshold": "dynamic"
+                },
+                "rsi_distance": "dynamic",
+                "volume_multiplier": "dynamic"
+            },
+            "moderate": {
+                "ema_conditions": {
+                    "min_separation_pips": "dynamic",
+                    "price_distance_pips": "dynamic",
+                    "angle_threshold": "dynamic"
+                },
+                "rsi_distance": "dynamic",
+                "volume_multiplier": "dynamic"
+            },
+            "weak": {
+                "ema_conditions": {
+                    "min_separation_pips": "dynamic",
+                    "price_distance_pips": "dynamic",
+                    "angle_threshold": "dynamic"
+                },
+                "rsi_distance": "dynamic",
+                "volume_multiplier": "dynamic"
+            }
+        },
+        "calculation": {
+            "weights": {
+                "ema": {
+                    "base": 0.4,
+                    "dynamic_adjustment": true
+                },
+                "rsi": {
+                    "base": 0.3,
+                    "dynamic_adjustment": true
+                },
+                "volume": {
+                    "base": 0.3,
+                    "dynamic_adjustment": true
+                }
+            }
+        }
+    },
+
+    "performance_metrics": {
+        "tracking": {
+            "win_rate": {
+                "minimum_threshold": 0.55,
+                "evaluation_period": "1D"
+            },
+            "risk_reward": {
+                "minimum_ratio": 1.5,
+                "target_ratio": 2.0
+            },
+            "consecutive_trades": {
+                "max_losses": 3,
+                "required_win_after_max_losses": 2
+            },
+            "profit_factor": {
+                "minimum": 1.2,
+                "target": 1.5
+            }
+        },
+        "adaptation_rules": {
+            "enabled": true,
+            "conditions": [
+                {
+                    "metric": "win_rate",
+                    "threshold": 0.45,
+                    "action": "increase_filters_strictness"
+                },
+                {
+                    "metric": "consecutive_losses",
+                    "threshold": 3,
+                    "action": "pause_trading"
+                },
+                {
+                    "metric": "profit_factor",
+                    "threshold": 1.1,
+                    "action": "reduce_position_size"
+                }
+            ]
+        }
+    }
+}

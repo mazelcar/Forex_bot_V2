@@ -1,6 +1,6 @@
 # Project Documentation
 
-Generated on: 2024-12-07 20:28:21
+Generated on: 2024-12-08 06:45:24
 
 ## Directory Structure
 Forex_V2
@@ -16,11 +16,12 @@ Forex_V2
 │   │   ├── __init__.py
 │   │   ├── bot.py
 │   │   ├── dashboard.py
+│   │   ├── market_sessions.py
 │   │   └── mt5.py
 │   ├── __init__.py
 │   └── audit.py
 ├── .gitignore
-├── PROJECT_STRUCTURE_20241207_202821.md
+├── PROJECT_STRUCTURE_20241208_064524.md
 ├── generate_file_structure.py
 ├── main.py
 └── tasks.py
@@ -557,34 +558,10 @@ def all(c):
 }
 ```
 
-### config\market_session.json (603.00 B)
+### config\market_session.json (0.00 B)
 
 ```json
-{
-    "utc_offset": "-6",
-    "sessions": {
-        "Sydney": {
-            "open": "21:00",
-            "close": "06:00",
-            "pairs": ["AUDUSD", "NZDUSD"]
-        },
-        "Tokyo": {
-            "open": "23:00",
-            "close": "08:00",
-            "pairs": ["USDJPY", "EURJPY"]
-        },
-        "London": {
-            "open": "03:00",
-            "close": "12:00",
-            "pairs": ["GBPUSD", "EURGBP"]
-        },
-        "New York": {
-            "open": "08:00",
-            "close": "17:00",
-            "pairs": ["EURUSD", "USDCAD"]
-        }
-    }
-}
+
 ```
 
 ### config\mt5_config.json (120.00 B)
@@ -1189,7 +1166,102 @@ class Dashboard:
                 print(f"Error: {str(e)}")
 ```
 
-### src\core\mt5.py (8.33 KB)
+### src\core\market_sessions.py (3.29 KB)
+
+```py
+"""Market Sessions Module for Forex Trading Bot V2.
+
+This module handles market sessions, holidays, and news events for the trading system.
+It reads from configuration files and provides real-time market session information.
+
+Author: mazelcar
+Created: December 2024
+"""
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Dict
+
+class MarketSessionManager:
+    """Manages market sessions, holidays, and news events."""
+
+    def __init__(self):
+        """Initialize market session manager."""
+        self.config_path = Path(__file__).parent.parent.parent / "config"
+        self.sessions = self._load_json("market_session.json")
+        self.holidays = self._load_json("market_holidays.json")
+        self.news = self._load_json("market_news.json")
+
+    def _load_json(self, filename: str) -> Dict:
+        """Load and parse JSON configuration file."""
+        try:
+            with open(self.config_path / filename, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error loading {filename}: {e}")
+            return {}
+
+    def is_holiday(self, market: str) -> bool:
+        """Check if today is a holiday for the given market."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        year = datetime.now().year
+
+        try:
+            market_holidays = self.holidays.get(str(year), {}).get(market, [])
+            return any(holiday["date"] == today for holiday in market_holidays)
+        except Exception as e:
+            print(f"Error checking holidays: {e}")
+            return False
+
+    def check_sessions(self) -> Dict[str, bool]:
+        """Check which markets are currently open."""
+        try:
+            current_time = datetime.now()
+            current_day = current_time.strftime("%A")
+
+            market_status = {}
+            for market, info in self.sessions.get("sessions", {}).items():
+                # Check if current day is a trading day
+                if current_day not in info.get("days", []):
+                    market_status[market] = False
+                    continue
+
+                # Check if holiday
+                if self.is_holiday(market):
+                    market_status[market] = False
+                    continue
+
+                # Get session times
+                open_hour = int(info["open"].split(":")[0])
+                close_hour = int(info["close"].split(":")[0])
+                current_hour = current_time.hour
+
+                # Handle overnight sessions
+                if open_hour > close_hour:
+                    is_open = current_hour >= open_hour or current_hour < close_hour
+                else:
+                    is_open = open_hour <= current_hour < close_hour
+
+                market_status[market] = is_open
+
+            return market_status
+
+        except Exception as e:
+            print(f"Error checking sessions: {e}")
+            return {market: False for market in self.sessions.get("sessions", {})}
+
+    def get_status(self) -> Dict:
+        """Get complete market status including holidays and news."""
+        current_status = self.check_sessions()
+
+        return {
+            'status': current_status,
+            'overall_status': 'OPEN' if any(current_status.values()) else 'CLOSED'
+        }
+```
+
+### src\core\mt5.py (8.38 KB)
 
 ```py
 """MT5 Integration Module for Forex Trading Bot V2.
@@ -1210,6 +1282,7 @@ from pathlib import Path
 import MetaTrader5 as mt5
 from datetime import datetime
 from typing import Dict, List, Optional
+from src.core.market_sessions import MarketSessionManager
 
 
 def create_default_config() -> bool:
@@ -1272,6 +1345,7 @@ class MT5Handler:
         self.connected = False
         self.config = get_mt5_config()
         self._initialize_mt5()
+        self.session_manager = MarketSessionManager()
 
     def _initialize_mt5(self) -> bool:
         """Connect to MT5 terminal."""
@@ -1326,36 +1400,29 @@ class MT5Handler:
             print(f"Error getting account info: {e}")
             return {}
 
-    def get_market_status(self):
-        """Get real market status from MT5."""
+    def get_market_status(self) -> Dict:
+        """Get market status considering both MT5 and session times."""
+        session_status = self.session_manager.get_status()
+
+        # Cross-reference with MT5 symbols
         try:
-            # Check major pairs to determine which sessions are open
-            pairs = {
-                'Sydney': 'AUDUSD',
-                'Tokyo': 'USDJPY',
-                'London': 'GBPUSD',
-                'New York': 'EURUSD'
-            }
+            for market, info in self.session_manager.sessions['sessions'].items():
+                # Check if any pair for this session is tradeable
+                pairs = info.get('pairs', [])
+                market_tradeable = any(
+                    mt5.symbol_info(pair).trade_mode != 0
+                    for pair in pairs
+                    if mt5.symbol_info(pair) is not None
+                )
+                # Market is only open if both session time and MT5 allow trading
+                session_status['status'][market] &= market_tradeable
 
-            status = {}
-            for market, symbol in pairs.items():
-                symbol_info = mt5.symbol_info(symbol)
-                if symbol_info is not None:
-                    # trade_mode 0 means market is closed
-                    status[market] = symbol_info.trade_mode != 0
-                else:
-                    status[market] = False
+            session_status['overall_status'] = 'OPEN' if any(session_status['status'].values()) else 'CLOSED'
 
-            return {
-                'status': status,
-                'overall_status': 'OPEN' if any(status.values()) else 'CLOSED'
-            }
         except Exception as e:
-            print(f"Error getting market status: {e}")
-            return {
-                'status': {market: False for market in pairs},
-                'overall_status': 'ERROR'
-            }
+            print(f"Error checking MT5 market status: {e}")
+
+        return session_status
 
     def place_trade(self, symbol: str, order_type: str, volume: float,
                    sl: Optional[float] = None, tp: Optional[float] = None) -> bool:
@@ -1462,7 +1529,7 @@ class MT5Handler:
 
 ## Project Statistics
 
-- Total Files: 14
-- Text Files: 13
+- Total Files: 15
+- Text Files: 14
 - Binary Files: 1
-- Total Size: 48.00 KB
+- Total Size: 50.75 KB
