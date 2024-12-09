@@ -11,7 +11,7 @@ import os
 import sys
 import time
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Tuple
 
@@ -103,7 +103,7 @@ def audit_mt5() -> None:
             logger.error("MT5 connection: FAILED")
             raise RuntimeError("Could not connect to MT5")
 
-        # Test scenarios
+        # Extended test scenarios
         test_scenarios = [
             {
                 "name": "Account connection test",
@@ -128,6 +128,35 @@ def audit_mt5() -> None:
                 "params": {
                     "symbols": ["EURUSD", "GBPUSD", "USDJPY"]
                 }
+            },
+            {
+                "name": "Symbol info validation",
+                "test": "symbol_info",
+                "params": {
+                    "symbols": ["EURUSD", "GBPUSD", "USDJPY"]
+                }
+            },
+            {
+                "name": "Historical data retrieval",
+                "test": "historical_data",
+                "params": {
+                    "symbol": "EURUSD",
+                    "timeframes": ["M1", "M5", "M15", "H1"]
+                }
+            },
+            {
+                "name": "Market session checks",
+                "test": "market_session",
+                "params": {
+                    "markets": ["Sydney", "Tokyo", "London", "New York"]
+                }
+            },
+            {
+                "name": "Price tick validation",
+                "test": "price_ticks",
+                "params": {
+                    "symbols": ["EURUSD", "GBPUSD", "USDJPY"]
+                }
             }
         ]
 
@@ -149,6 +178,8 @@ def audit_mt5() -> None:
                         missing_fields = [field for field in required_fields if field not in account_info]
                         if not missing_fields:
                             logger.info("Account info structure: Valid")
+                            for field, value in account_info.items():
+                                logger.info(f"  {field}: {value}")
                         else:
                             logger.error("Account info missing fields: %s", missing_fields)
                     else:
@@ -161,19 +192,94 @@ def audit_mt5() -> None:
                     if isinstance(positions, list):
                         logger.info("Positions structure: Valid")
                         logger.info("Current open positions: %d", len(positions))
+                        for pos in positions:
+                            logger.info(f"  Position: {pos['symbol']} {pos['type']} {pos['volume']} lots")
                     else:
                         logger.error("Positions invalid type: %s", type(positions))
 
                 elif scenario['test'] == 'market_data':
-                    # Test market data access
                     import MetaTrader5 as mt5
                     for symbol in scenario['params']['symbols']:
                         tick = mt5.symbol_info_tick(symbol)
                         if tick is not None:
-                            logger.info("Market data for %s: Available (Bid: %.5f, Ask: %.5f)",
-                                      symbol, tick.bid, tick.ask)
+                            logger.info(f"Market data for {symbol}:")
+                            logger.info(f"  Bid: {tick.bid:.5f}")
+                            logger.info(f"  Ask: {tick.ask:.5f}")
+                            logger.info(f"  Spread: {(tick.ask - tick.bid):.5f}")
+                            logger.info(f"  Volume: {tick.volume}")
+                            logger.info(f"  Time: {datetime.fromtimestamp(tick.time)}")
                         else:
                             logger.error("Market data for %s: Unavailable", symbol)
+
+                elif scenario['test'] == 'symbol_info':
+                    for symbol in scenario['params']['symbols']:
+                        info = mt5_handler.get_symbol_info(symbol)
+                        if info is not None:
+                            logger.info(f"Symbol info for {symbol}:")
+                            for key, value in info.items():
+                                logger.info(f"  {key}: {value}")
+                        else:
+                            logger.error(f"Symbol info not available for {symbol}")
+
+                elif scenario['test'] == 'historical_data':
+                    # Use last Thursday
+                    end_date = datetime.now()
+                    while end_date.weekday() != 3:  # 3 is Thursday
+                        end_date = end_date - timedelta(days=1)
+                    # Set to market close time (17:00 EST)
+                    end_date = end_date.replace(hour=17, minute=0, second=0, microsecond=0)
+                    # Get previous 24 hours
+                    start_date = end_date - timedelta(days=1)
+
+                    logger.info("Testing with detailed parameters:")
+                    logger.info(f"Start date: {start_date}")
+                    logger.info(f"End date: {end_date}")
+
+                    for tf in scenario['params']['timeframes']:
+                        data = mt5_handler.get_historical_data(
+                            scenario['params']['symbol'],
+                            tf,
+                            start_date,
+                            end_date
+                        )
+
+                        if data is not None:
+                            logger.info(f"Historical data for {scenario['params']['symbol']} {tf}:")
+                            logger.info(f"  Rows: {len(data)}")
+                            logger.info(f"  Columns: {list(data.columns)}")
+                            if len(data) > 0:
+                                logger.info(f"  First timestamp: {data['time'].iloc[0]}")
+                                logger.info(f"  Last timestamp: {data['time'].iloc[-1]}")
+                            else:
+                                logger.info("  No data points available in the specified timeframe")
+                                error = mt5.last_error()
+                                logger.error(f"  MT5 Error getting data: {error}")
+                        else:
+                            logger.error(f"Historical data not available for {tf}")
+                            error = mt5.last_error()
+                            logger.error(f"  MT5 Error: {error}")
+
+                elif scenario['test'] == 'market_session':
+                    status = mt5_handler.get_market_status()
+                    logger.info("Market session status:")
+                    for market, is_open in status['status'].items():
+                        logger.info(f"  {market}: {'OPEN' if is_open else 'CLOSED'}")
+                    logger.info(f"Overall status: {status['overall_status']}")
+
+                elif scenario['test'] == 'price_ticks':
+                    import MetaTrader5 as mt5
+                    for symbol in scenario['params']['symbols']:
+                        ticks = mt5.copy_ticks_from(symbol, datetime.now() - timedelta(minutes=1), 100, mt5.COPY_TICKS_ALL)
+                        if ticks is not None:
+                            logger.info(f"Price ticks for {symbol}:")
+                            logger.info(f"  Number of ticks: {len(ticks)}")
+                            if len(ticks) > 0:
+                                logger.info("  Latest tick details:")
+                                logger.info(f"    Bid: {ticks[-1]['bid']:.5f}")
+                                logger.info(f"    Ask: {ticks[-1]['ask']:.5f}")
+                                logger.info(f"    Volume: {ticks[-1]['volume']}")
+                        else:
+                            logger.error(f"No ticks available for {symbol}")
 
                 logger.info("Scenario %s: Completed", scenario['name'])
 
@@ -193,6 +299,9 @@ def audit_mt5() -> None:
             # Just validate the parameters without placing the trade
             if all(param in test_trade_params for param in ['symbol', 'order_type', 'volume']):
                 logger.info("Trade parameters structure: Valid")
+                logger.info("Trade parameters:")
+                for param, value in test_trade_params.items():
+                    logger.info(f"  {param}: {value}")
             else:
                 logger.error("Trade parameters structure: Invalid")
         except Exception as e:  # pylint: disable=broad-except

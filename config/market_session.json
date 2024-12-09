@@ -1,0 +1,39 @@
+{
+    "utc_offset": "-6",
+    "trading_days": {
+        "start": {
+            "day": "Sunday",
+            "time": "17:00"
+        },
+        "end": {
+            "day": "Friday",
+            "time": "17:00"
+        }
+    },
+    "sessions": {
+        "Sydney": {
+            "open": "21:00",
+            "close": "06:00",
+            "pairs": ["AUDUSD", "NZDUSD"],
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        },
+        "Tokyo": {
+            "open": "23:00",
+            "close": "08:00",
+            "pairs": ["USDJPY", "EURJPY"],
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        },
+        "London": {
+            "open": "03:00",
+            "close": "12:00",
+            "pairs": ["GBPUSD", "EURGBP"],
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        },
+        "New York": {
+            "open": "08:00",
+            "close": "17:00",
+            "pairs": ["EURUSD", "USDCAD"],
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        }
+    }
+}
