@@ -103,65 +103,70 @@ class Backtester:
             return {}
 
     def _run_simulation(self, data: pd.DataFrame) -> Dict:
-        """Run the actual backtest simulation.
-
-        Args:
-            data: Historical price data
-
-        Returns:
-            Backtest results
-        """
+        """Run the actual backtest simulation."""
         current_equity = self.initial_balance
         running_drawdown = 0
         max_drawdown = 0
         peak_equity = self.initial_balance
 
         print("Starting backtest simulation...")
+        print(f"Initial data shape: {data.shape}")
+
+        # Calculate minimum required window size
+        min_window = max(
+            self.strategy.slow_ema_period * 2,  # For EMA calculation
+            200,  # For trend analysis
+            self.strategy.rsi_period * 2,  # For RSI
+            self.strategy.volume_period * 2,  # For volume analysis
+            20  # Minimum baseline
+        )
 
         for index in range(len(data)):
             # Get current window of data for analysis
-            current_window = data.iloc[max(0, index-100):index+1]
+            current_window = data.iloc[max(0, index-min_window):index+1]
 
-            # Skip if not enough data
-            if len(current_window) < 20:  # Minimum required for indicators
+            # Skip if not enough data points
+            if len(current_window) < min_window:
                 continue
 
-            # Update strategy market condition
-            self.strategy.update_market_condition(current_window)
+            try:
+                # Update strategy market condition
+                self.strategy.update_market_condition(current_window)
 
-            # Generate signals
-            signal = self.strategy.generate_signals(current_window)
+                # Generate signals only if we have enough data
+                signal = self.strategy.generate_signals(current_window)
 
-            # Process open positions
-            current_equity = self._process_positions(
-                current_window.iloc[-1],
-                current_equity
-            )
+                # Process open positions
+                current_equity = self._process_positions(
+                    current_window.iloc[-1],
+                    current_equity
+                )
 
-            # Update drawdown calculations
-            if current_equity > peak_equity:
-                peak_equity = current_equity
+                # Update drawdown calculations
+                if current_equity > peak_equity:
+                    peak_equity = current_equity
 
-            current_drawdown = (peak_equity - current_equity) / peak_equity
-            if current_drawdown > max_drawdown:
-                max_drawdown = current_drawdown
+                current_drawdown = (peak_equity - current_equity) / peak_equity
+                if current_drawdown > max_drawdown:
+                    max_drawdown = current_drawdown
 
-            # Handle new signals
-            if signal.get('type') in ['BUY', 'SELL']:
-                # Validate signal
-                if self.strategy.validate_signal(signal, current_window.iloc[-1]):
-                    self._process_signal(
-                        signal,
-                        current_window.iloc[-1],
-                        current_equity
-                    )
+                # Handle new signals
+                if signal and signal.get('type') in ['BUY', 'SELL']:
+                    # Validate signal
+                    if self.strategy.validate_signal(signal, current_window.iloc[-1]):
+                        self._process_signal(
+                            signal,
+                            current_window.iloc[-1],
+                            current_equity
+                        )
+            except Exception as e:
+                print(f"Error at bar {index}: {str(e)}")
+                continue
 
             # Update equity curve
             self.equity_curve.append(current_equity)
 
-        # Calculate final results
-        self.results = self._calculate_results(data)
-        return self.results
+        return self._calculate_results(data)
 
     def _process_positions(self, current_bar: pd.Series, equity: float) -> float:
         """Process open positions.

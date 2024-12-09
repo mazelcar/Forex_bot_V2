@@ -566,6 +566,192 @@ def audit_backtest() -> None:
         logger.error(f"Backtest audit failed: {str(e)}")
         raise
 
+def audit_run_backtest() -> None:
+    """Audit backtest runtime functionality."""
+    print("\n=== Starting Run Backtest Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Run Backtest Audit")
+
+    try:
+        # Initialize components
+        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.strategy.backtesting import Backtester
+        from src.core.mt5 import MT5Handler
+
+        strategy_config = str(Path("config/strategy.json"))
+        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
+        logger.info("Strategy instance created")
+
+        backtester = Backtester(
+            strategy=strategy,
+            initial_balance=10000,
+            commission=2.0,
+            spread=0.0001
+        )
+        logger.info("Backtester instance created")
+
+        mt5_handler = MT5Handler()
+        logger.info("MT5Handler instance created")
+
+        # Get small sample of test data
+        symbol = "EURUSD"
+        timeframe = "M5"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(hours=1)  # Just 1 hour for testing
+
+        logger.info(f"\nFetching test data:")
+        logger.info(f"Symbol: {symbol}")
+        logger.info(f"Timeframe: {timeframe}")
+        logger.info(f"Period: {start_date} to {end_date}")
+
+        data = mt5_handler.get_historical_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if data is not None:
+            # Add symbol column
+            data['symbol'] = symbol
+
+            logger.info(f"Retrieved {len(data)} data points")
+            logger.info(f"Columns: {list(data.columns)}")
+
+            # Test windowing
+            logger.info("\nTesting data windowing:")
+            current_window = data.iloc[0:20]  # Get first 20 bars
+            logger.info(f"Window size: {len(current_window)}")
+            logger.info(f"Window columns: {list(current_window.columns)}")
+
+            # Test market condition update
+            logger.info("\nTesting market condition update:")
+            try:
+                strategy.update_market_condition(current_window)
+                logger.info("Market condition updated successfully")
+                logger.info(f"Current condition: {strategy.current_market_condition}")
+            except Exception as e:
+                logger.error(f"Market condition update failed: {str(e)}")
+
+            # Test signal generation
+            logger.info("\nTesting signal generation:")
+            try:
+                signal = strategy.generate_signals(current_window)
+                logger.info(f"Signal generated: {signal}")
+            except Exception as e:
+                logger.error(f"Signal generation failed: {str(e)}")
+                logger.error(f"Current window head:\n{current_window.head()}")
+
+            # Test validation
+            logger.info("\nTesting signal validation:")
+            if signal:
+                try:
+                    is_valid = strategy.validate_signal(signal, current_window.iloc[-1])
+                    logger.info(f"Signal validation result: {is_valid}")
+                except Exception as e:
+                    logger.error(f"Signal validation failed: {str(e)}")
+
+            # Test simulation
+            logger.info("\nTesting simulation run:")
+            try:
+                results = backtester._run_simulation(current_window)
+                logger.info(f"Simulation results: {results}")
+            except Exception as e:
+                logger.error(f"Simulation failed: {str(e)}")
+
+        logger.info("\nRun Backtest audit completed")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:
+        logger.error(f"Run Backtest audit failed: {str(e)}")
+        raise
+
+def audit_calculations() -> None:
+    """Audit strategy calculations."""
+    print("\n=== Starting Calculation Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Calculation Audit")
+
+    try:
+        # Setup test environment
+        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.core.mt5 import MT5Handler
+
+        strategy_config = str(Path("config/strategy.json"))
+        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
+        logger.info("Strategy instance created")
+
+        mt5_handler = MT5Handler()
+        logger.info("MT5Handler instance created")
+
+        # Get larger sample for better calculation testing
+        symbol = "EURUSD"
+        timeframe = "M5"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(hours=24)  # 24 hours of data
+
+        data = mt5_handler.get_historical_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if data is not None:
+            data['symbol'] = symbol
+            logger.info(f"Retrieved {len(data)} data points")
+
+            # Test ATR calculation
+            logger.info("\nTesting ATR calculation:")
+            try:
+                atr = strategy._calculate_atr(data)
+                logger.info(f"ATR value: {atr}")
+                logger.info("ATR calculation components:")
+                logger.info(f"High-Low range: {(data['high'] - data['low']).mean()}")
+                logger.info(f"High-PrevClose range: {abs(data['high'] - data['close'].shift()).mean()}")
+                logger.info(f"Low-PrevClose range: {abs(data['low'] - data['close'].shift()).mean()}")
+            except Exception as e:
+                logger.error(f"ATR calculation failed: {str(e)}")
+
+            # Test volume analysis
+            logger.info("\nTesting volume analysis:")
+            try:
+                volume_data = strategy._analyze_volume_conditions(data)
+                logger.info(f"Volume analysis: {volume_data}")
+                logger.info("Volume components:")
+                logger.info(f"Current volume: {data['tick_volume'].iloc[-1]}")
+                logger.info(f"Volume SMA: {data['tick_volume'].rolling(window=strategy.volume_period).mean().iloc[-1]}")
+            except Exception as e:
+                logger.error(f"Volume analysis failed: {str(e)}")
+
+            # Test signal strength calculation
+            logger.info("\nTesting signal strength calculation:")
+            try:
+                test_crossover = {'type': 'BULLISH', 'strength': 0.8}
+                test_rsi = 45.0
+                test_volume = {'above_average': True, 'high_volume': False, 'volume_ratio': 1.2}
+                strength = strategy._calculate_signal_strength(
+                    test_crossover,
+                    test_rsi,
+                    test_volume,
+                    data['close'].iloc[-1],
+                    data['close'].iloc[-2]
+                )
+                logger.info(f"Signal strength: {strength}")
+            except Exception as e:
+                logger.error(f"Signal strength calculation failed: {str(e)}")
+
+        logger.info("Calculation audit completed")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:
+        logger.error(f"Calculation audit failed: {str(e)}")
+        raise
+
 def audit_dashboard() -> None:
     """Audit dashboard functionality without displaying on screen."""
     print("\n=== Starting Dashboard Audit ===")
@@ -685,6 +871,12 @@ def run_audit(target: str) -> None:
 
     if target in ['base', 'all']:
         audit_base_strategy()
+
+    if target in ['run_backtest', 'all']:
+        audit_run_backtest()
+
+    if target in ['calculations', 'all']:
+        audit_calculations()
 
     if target == 'all':
         # TODO: Add other module audits here  # pylint: disable=fixme
