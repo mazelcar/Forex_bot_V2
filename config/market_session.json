@@ -1,6 +1,19 @@
 {
     "utc_offset": "-6",
+    "_utc_description": "Local timezone offset from UTC in hours using offset of -6 because I am in Costa Rica",
+    "_trading_days_description": "Market opens Sunday 17:00 and closes Friday 17:00 Costarican time (UTC-6)",
+    "_dst_description": "Session times may shift by 1 hour during DST periods in their respective regions",
+
+    "_sessions_description": {
+        "time_format": "24-hour format (HH:MM)",
+        "dst_rules": {
+            "week": "1-4 for specific week, -1 for last week of month",
+            "offset": "Hours to add during DST period"
+        }
+    },
+
     "trading_days": {
+        "_description": "Global forex market trading window",
         "start": {
             "day": "Sunday",
             "time": "17:00"
@@ -11,29 +24,62 @@
         }
     },
     "sessions": {
+        "_description": "Major forex trading sessions with their operating hours and primary currency pairs",
+
         "Sydney": {
+            "_description": "Australian/Pacific trading session",
             "open": "21:00",
             "close": "06:00",
             "pairs": ["AUDUSD", "NZDUSD"],
-            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+            "_pairs_description": "Major pairs traded during Sydney session",
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+            "dst": {
+                "_description": "Australian DST period",
+                "start": {"month": 10, "week": 1, "day": "Sunday"},
+                "end": {"month": 4, "week": 1, "day": "Sunday"},
+                "offset": 1
+            }
         },
         "Tokyo": {
+            "_description": "Asian trading session",
             "open": "23:00",
             "close": "08:00",
             "pairs": ["USDJPY", "EURJPY"],
-            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+            "_pairs_description": "Major pairs traded during Tokyo session",
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+            "dst": {
+                "_description": "Japan does not observe DST",
+                "start": null,
+                "end": null,
+                "offset": null
+            }
         },
         "London": {
+            "_description": "European trading session - typically highest volume",
             "open": "03:00",
             "close": "12:00",
             "pairs": ["GBPUSD", "EURGBP"],
-            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+            "_pairs_description": "Major pairs traded during London session",
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+            "dst": {
+                "_description": "European DST period",
+                "start": {"month": 3, "week": -1, "day": "Sunday"},
+                "end": {"month": 10, "week": -1, "day": "Sunday"},
+                "offset": 1
+            }
         },
         "New York": {
+            "_description": "North American trading session",
             "open": "08:00",
             "close": "17:00",
             "pairs": ["EURUSD", "USDCAD"],
-            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+            "days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
+            "dst": {
+                "_description": "US DST period",
+                "start": {"month": 3, "week": 2, "day": "Sunday"},
+                "end": {"month": 11, "week": 1, "day": "Sunday"},
+                "offset": 1
+            }
         }
     }
 }

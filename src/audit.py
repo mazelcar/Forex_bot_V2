@@ -15,6 +15,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Tuple
 
+import pandas as pd
+
 from src.core.dashboard import Dashboard
 
 def setup_audit_logging() -> Tuple[logging.Logger, Path, str]:
@@ -80,6 +82,101 @@ def setup_audit_logging() -> Tuple[logging.Logger, Path, str]:
         print(f"Error message: {str(e)}")
         print(f"Current working directory: {Path.cwd()}")
         sys.exit(1)
+
+def audit_strategy() -> None:
+    """Audit MA RSI Volume strategy functionality."""
+    print("\n=== Starting Strategy Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Strategy Audit")
+
+    try:
+        # Initialize strategy with config
+        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        strategy_config = str(Path("config/strategy.json"))
+        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
+        logger.info("Strategy instance created")
+
+        # List all methods in the strategy class
+        logger.info("\nInspecting strategy methods:")
+        import inspect
+        methods = inspect.getmembers(strategy, predicate=inspect.ismethod)
+        for name, method in methods:
+            if not name.startswith('_'):
+                logger.info(f"Public method: {name}")
+            else:
+                logger.info(f"Private method: {name}")
+
+        # Initialize MT5 handler for test data
+        from src.core.mt5 import MT5Handler
+        mt5_handler = MT5Handler(debug=True)
+        logger.info("MT5Handler instance created")
+
+        # Get sample data for testing
+        symbol = "EURUSD"
+        timeframe = "M5"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=1)
+
+        logger.info(f"\nFetching test data for {symbol} from {start_date} to {end_date}")
+        test_data = mt5_handler.get_historical_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if test_data is not None:
+            logger.info(f"Retrieved {len(test_data)} data points")
+            logger.info(f"Columns available: {list(test_data.columns)}")
+
+            # Test each major component
+            logger.info("\nTesting market condition analysis...")
+            try:
+                market_condition = strategy._analyze_market_condition(test_data)
+                logger.info(f"Market condition result: {market_condition}")
+            except Exception as e:
+                logger.error(f"Market condition analysis failed: {e}")
+
+            logger.info("\nTesting volatility calculation...")
+            try:
+                volatility = strategy._calculate_volatility(test_data)
+                logger.info(f"Volatility result: {volatility}")
+            except Exception as e:
+                logger.error(f"Volatility calculation failed: {e}")
+
+            logger.info("\nTesting volume analysis...")
+            try:
+                # Try to find the correct volume analysis method
+                for name, method in methods:
+                    if 'volume' in name.lower() and 'analyze' in name.lower():
+                        logger.info(f"Found volume analysis method: {name}")
+                        volume_result = method(test_data)
+                        logger.info(f"Volume analysis result: {volume_result}")
+                        break
+                else:
+                    logger.error("No volume analysis method found")
+            except Exception as e:
+                logger.error(f"Volume analysis failed: {e}")
+
+            logger.info("\nTesting signal generation...")
+            try:
+                signals = strategy.generate_signals(test_data)
+                logger.info(f"Generated signals: {signals}")
+            except Exception as e:
+                logger.error(f"Signal generation failed: {e}")
+
+        else:
+            logger.error("Failed to retrieve test data")
+
+        logger.info("Strategy audit completed successfully")
+        print("\n=== Strategy Audit Complete ===")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:
+        logger.error(f"Strategy audit failed: {str(e)}")
+        raise
 
 def audit_mt5() -> None:
     """Audit MT5 functionality and connection."""
@@ -320,6 +417,155 @@ def audit_mt5() -> None:
             mt5_handler.__del__()
             logger.info("MT5 connection closed")
 
+def audit_base_strategy() -> None:
+    """Audit base Strategy functionality."""
+    print("\n=== Starting Base Strategy Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Base Strategy Audit")
+
+    try:
+        # We'll use MA_RSI_Volume_Strategy since it inherits from base Strategy
+        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        strategy_config = str(Path("config/strategy.json"))
+        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
+        logger.info("Strategy instance created")
+
+        # Create test market data
+        sample_data = pd.DataFrame({
+            'symbol': ['EURUSD'],
+            'spread': [2.0],
+            'time': [datetime.now()],
+            'session': ['London']
+        })
+
+        logger.info("\nTesting signal validation...")
+        test_signals = [
+            {'type': 'BUY', 'strength': 0.8},
+            {'type': 'SELL', 'strength': 0.3},
+            {'type': 'NONE', 'strength': 0.0},
+            {},  # Empty signal
+            None  # None signal
+        ]
+
+        for signal in test_signals:
+            try:
+                logger.info(f"\nValidating signal: {signal}")
+                logger.info(f"Market data: {dict(sample_data.iloc[0])}")
+                is_valid = strategy.validate_signal(signal, sample_data.iloc[0])
+                logger.info(f"Validation result: {is_valid}")
+            except Exception as e:
+                logger.error(f"Validation failed: {str(e)}")
+
+        logger.info("Base Strategy audit completed successfully")
+        print("\n=== Base Strategy Audit Complete ===")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:
+        logger.error(f"Base Strategy audit failed: {str(e)}")
+        raise
+
+def audit_backtest() -> None:
+    """Audit backtesting functionality."""
+    print("\n=== Starting Backtest Audit ===")
+    print("Setting up logging...")
+
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Backtest Audit")
+
+    try:
+        # Initialize strategy and backtester
+        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.strategy.backtesting import Backtester
+        from src.core.mt5 import MT5Handler
+
+        # Create strategy instance
+        strategy_config = str(Path("config/strategy.json"))
+        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
+        logger.info("Strategy instance created")
+
+        # Create backtester instance
+        backtester = Backtester(
+            strategy=strategy,
+            initial_balance=10000,
+            commission=2.0,
+            spread=0.0001
+        )
+        logger.info("Backtester instance created")
+
+        # Get test data
+        mt5_handler = MT5Handler(debug=True)
+        logger.info("MT5Handler instance created")
+
+        # Test short timeframe first
+        symbol = "EURUSD"
+        timeframe = "M5"
+        end_date = datetime.now()
+        start_date = end_date - timedelta(hours=4)  # Just 4 hours for testing
+
+        logger.info(f"\nTesting short timeframe backtest:")
+        logger.info(f"Symbol: {symbol}")
+        logger.info(f"Timeframe: {timeframe}")
+        logger.info(f"Period: {start_date} to {end_date}")
+
+        test_data = mt5_handler.get_historical_data(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        if test_data is not None:
+            # Add symbol column to data
+            test_data['symbol'] = symbol
+
+            logger.info(f"Retrieved {len(test_data)} data points")
+            logger.info(f"Columns available: {list(test_data.columns)}")
+
+            # Test backtester components
+            logger.info("\nTesting data windowing...")
+            window_size = 100
+            test_window = test_data.iloc[0:min(window_size, len(test_data))]
+            logger.info(f"Window size: {len(test_window)}")
+            logger.info(f"Window columns: {list(test_window.columns)}")
+
+            logger.info("\nTesting strategy update...")
+            strategy.update_market_condition(test_window)
+            logger.info("Strategy updated with window data")
+
+            logger.info("\nTesting signal generation...")
+            try:
+                signal = strategy.generate_signals(test_window)
+                logger.info(f"Generated signal: {signal}")
+            except Exception as e:
+                logger.error(f"Signal generation failed: {str(e)}")
+                logger.error(f"Data shape: {test_window.shape}")
+                logger.error(f"Data columns: {test_window.columns}")
+
+            logger.info("\nTesting position processing...")
+            equity = backtester._process_positions(test_window.iloc[-1], 10000)
+            logger.info(f"Processed positions, equity: {equity}")
+
+            logger.info("\nRunning full backtest simulation...")
+            logger.info("Creating simulation data...")
+            sim_data = test_data.copy()  # Create a copy for simulation
+            sim_data['symbol'] = symbol   # Ensure symbol column exists
+
+            results = backtester._run_simulation(sim_data)
+            logger.info(f"Backtest results: {results}")
+
+        else:
+            logger.error("Failed to retrieve test data")
+
+        logger.info("Backtest audit completed successfully")
+        print("\n=== Backtest Audit Complete ===")
+        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+    except Exception as e:
+        logger.error(f"Backtest audit failed: {str(e)}")
+        raise
+
 def audit_dashboard() -> None:
     """Audit dashboard functionality without displaying on screen."""
     print("\n=== Starting Dashboard Audit ===")
@@ -430,6 +676,15 @@ def run_audit(target: str) -> None:
 
     if target == 'mt5':
         audit_mt5()
+
+    if target in ['strategy', 'all']:
+        audit_strategy()
+
+    if target in ['backtest', 'all']:
+        audit_backtest()
+
+    if target in ['base', 'all']:
+        audit_base_strategy()
 
     if target == 'all':
         # TODO: Add other module audits here  # pylint: disable=fixme
