@@ -6,10 +6,14 @@ This module implements a trading strategy that combines:
 3. Volume analysis with smart thresholds
 """
 
+from datetime import datetime
 from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
+
+from src.strategy.validation.indicator_validator import IndicatorValidator
 from .base import Strategy
+from .validation.data_validator import DataValidator
 
 class MA_RSI_Volume_Strategy(Strategy):
     def __init__(self, config_file: str):
@@ -29,6 +33,10 @@ class MA_RSI_Volume_Strategy(Strategy):
         self.risk_percent = 0.01  # Risk 1% per trade
         self.default_pip_value_per_lot = 10.0  # For EURUSD
         self.point_value = 0.0001  # EURUSD point
+
+        # Initialize DataValidator
+        self.data_validator = DataValidator(self.config)
+        self.indicator_validator = IndicatorValidator(self.config)
 
     def _calculate_volatility(self, data: pd.DataFrame) -> float:
         return self._calculate_atr(data, period=14)
@@ -97,12 +105,15 @@ class MA_RSI_Volume_Strategy(Strategy):
             self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['period']
 
     def generate_signals(self, data: pd.DataFrame) -> Dict:
-        # Run basic data validation first
-        validation_results = self._validate_basic_data(data)
-
-        # Only proceed if validation passes
-        if not validation_results['overall_pass']:
+        # Run validations through validators
+        data_validation = self.data_validator.validate_basic_data(data)
+        if not data_validation['overall_pass']:
             return {'type': 'NONE', 'strength': 0}
+
+        indicator_validation = self.indicator_validator.validate_indicator_warmup(data)
+        if not indicator_validation['overall_pass']:
+            return {'type': 'NONE', 'strength': 0}
+
         try:
             min_periods = max(self.fast_ema_period, self.slow_ema_period, self.rsi_period, 20)
 
@@ -194,106 +205,6 @@ class MA_RSI_Volume_Strategy(Strategy):
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
-    def _validate_basic_data(self, data: pd.DataFrame) -> Dict:
-        """
-        Step 1: Basic Data Validation
-        Validates that we have all required data before proceeding with strategy.
-        """
-        validation_results = {
-            'overall_pass': True,
-            'checks': {},
-            'error_messages': []
-        }
-
-        print("\n========== STEP 1: BASIC DATA VALIDATION ==========")
-
-        # 1. Check if we have enough price data
-        min_required_bars = max(
-            self.fast_ema_period * 2,  # For EMA calculation
-            self.slow_ema_period * 2,  # For EMA calculation
-            self.rsi_period * 2,       # For RSI calculation
-            self.volume_period * 2,    # For volume analysis
-            50                         # Minimum for trend analysis
-        )
-
-        has_enough_data = len(data) >= min_required_bars
-        validation_results['checks']['enough_data'] = has_enough_data
-        print(f"\n1.1 Price Data Check:")
-        print(f"-> Required Bars: {min_required_bars}")
-        print(f"-> Available Bars: {len(data)}")
-        print(f"{'[PASS]' if has_enough_data else '[FAIL]'}: Price Data Check")
-
-        if not has_enough_data:
-            msg = f"Insufficient data: need {min_required_bars}, have {len(data)}"
-            validation_results['error_messages'].append(msg)
-            validation_results['overall_pass'] = False
-
-        # 2. Check if required price columns exist
-        required_columns = ['open', 'high', 'low', 'close']
-        missing_columns = [col for col in required_columns if col not in data.columns]
-        has_required_columns = len(missing_columns) == 0
-        validation_results['checks']['required_columns'] = has_required_columns
-
-        print(f"\n1.2 Required Columns Check:")
-        print(f"-> Looking for: {', '.join(required_columns)}")
-        print(f"-> Found Columns: {', '.join(data.columns)}")
-        print(f"{'[PASS]' if has_required_columns else '[FAIL]'}: Required Columns Check")
-
-
-        if not has_required_columns:
-            msg = f"Missing required columns: {missing_columns}"
-            validation_results['error_messages'].append(msg)
-            validation_results['overall_pass'] = False
-
-        # 3. Check for valid values in price data
-        if has_required_columns:
-            has_valid_prices = not data[required_columns].isnull().any().any()
-            validation_results['checks']['valid_prices'] = has_valid_prices
-
-            print(f"\n1.3 Price Data Quality Check:")
-            if has_valid_prices:
-                print(f"All price data is valid")
-                print("PASS: Price Data Quality Check")
-            else:
-                null_counts = data[required_columns].isnull().sum()
-                print(f"✓ Found null values:")
-                for col in required_columns:
-                    if null_counts[col] > 0:
-                        print(f"  • {col}: {null_counts[col]} null values")
-                print("FAIL: Price Data Quality Check")
-                msg = "Found null values in price data"
-                validation_results['error_messages'].append(msg)
-                validation_results['overall_pass'] = False
-
-        # 4. Check for volume data
-        volume_cols = ['tick_volume', 'real_volume']
-        has_volume = any(col in data.columns for col in volume_cols)
-        validation_results['checks']['has_volume'] = has_volume
-
-        print(f"\n1.4 Volume Data Check:")
-        print(f"Looking for any of: {', '.join(volume_cols)}")
-        if has_volume:
-            found_vol = next(col for col in volume_cols if col in data.columns)
-            valid_volume = not data[found_vol].isnull().any() and (data[found_vol] >= 0).all()
-            print(f"Found {found_vol} data")
-            print(f"Volume data validation: {'Valid' if valid_volume else 'Invalid'}")
-            print("PASS: Volume Data Check")
-        else:
-            print("FAIL: No volume data found")
-            msg = "No volume data available"
-            validation_results['error_messages'].append(msg)
-            validation_results['overall_pass'] = False
-
-        # Print overall validation summary
-        print("\n========== VALIDATION SUMMARY ==========")
-        print(f"Overall Status: {'PASSED' if validation_results['overall_pass'] else 'FAILED'}")
-        if validation_results['error_messages']:
-            print("\nError Messages:")
-            for msg in validation_results['error_messages']:
-                print(f"• {msg}")
-        print("=======================================")
-
-        return validation_results
 
     def _analyze_market_trend(self, data: pd.DataFrame) -> Dict:
         """Analyze the market trend using multiple timeframes."""

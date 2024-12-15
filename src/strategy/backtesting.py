@@ -61,20 +61,14 @@ class Backtester:
             start_date: datetime,
             end_date: datetime,
             ) -> Dict:
-        """Run backtest over specified period.
-
-        Args:
-            symbol: Trading symbol
-            timeframe: Timeframe for analysis
-            start_date: Backtest start date
-            end_date: Backtest end date
-
-        Returns:
-            Dictionary containing backtest results
-        """
+        """Run backtest over specified period."""
         try:
+            print("\n" + "="*50)
+            print("Starting Backtest Run")
+            print("="*50)
+
             # Get historical data
-            print(f"Fetching historical data for {symbol}...")
+            print(f"\nFetching historical data for {symbol}...")
             data = self.mt5_handler.get_historical_data(
                 symbol=symbol,
                 timeframe=timeframe,
@@ -86,10 +80,35 @@ class Backtester:
                 raise ValueError(f"No historical data available for {symbol}")
 
             print(f"Retrieved {len(data)} data points")
+            print(f"Data range: {data['time'].min()} to {data['time'].max()}")
 
-            # Add symbol column - ADDED THIS LINE
+            # Add symbol column
             data['symbol'] = symbol
 
+            print("\nStarting Step 1.1: Basic Data Validation...")
+            # Use the validator through the strategy
+            basic_validation = self.strategy.data_validator.validate_basic_data(data)
+            if not basic_validation['overall_pass']:
+                print("Basic validation failed")
+                if 'error_messages' in basic_validation:
+                    for msg in basic_validation['error_messages']:
+                        print(f"Error: {msg}")
+                return {}
+
+            print("\nStarting Step 1.2: Test Period Validation...")
+            print(f"Validating period from {start_date} to {end_date}")
+            # Test period validation
+            period_validation = self.strategy.data_validator.validate_test_period(
+                data, start_date, end_date
+            )
+            if not period_validation['overall_pass']:
+                print("Period validation failed")
+                if 'error_messages' in period_validation:
+                    for msg in period_validation['error_messages']:
+                        print(f"Error: {msg}")
+                return {}
+
+            print("\nAll validations passed, proceeding with simulation...")
             # Add spread to data
             if self.spread > 0:
                 data['ask'] = data['close'] + self.spread
@@ -103,6 +122,8 @@ class Backtester:
 
         except Exception as e:
             print(f"Backtest failed: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             return {}
 
     def _run_simulation(self, data: pd.DataFrame) -> Dict:
@@ -115,7 +136,11 @@ class Backtester:
         print("Starting backtest simulation...")
         print(f"Initial data shape: {data.shape}")
 
-        # Calculate minimum required window size
+        # Calculate minimum required window size AFTER market condition analysis
+        self.strategy.update_market_condition(data)  # Update market condition first
+        self.strategy._adjust_parameters()  # Let strategy adjust its parameters
+
+        # Now calculate the window size with adjusted parameters
         min_window = max(
             self.strategy.slow_ema_period * 2,  # For EMA calculation
             30,  # For trend analysis
@@ -124,19 +149,32 @@ class Backtester:
             20  # Minimum baseline
         )
 
-        for index in range(len(data)):
-            # Get current window of data for analysis
-            current_window = data.iloc[max(0, index-min_window):index+1]
+        print(f"\nRequired window size after parameter adjustment: {min_window}")
 
-            # Skip if not enough data points
-            if len(current_window) < min_window:
-                continue
+        if len(data) < min_window:
+            print(f"Insufficient data for simulation: need {min_window}, have {len(data)}")
+            return {
+                'total_trades': 0,
+                'winning_trades': 0,
+                'losing_trades': 0,
+                'gross_profit': 0,
+                'gross_loss': 0,
+                'total_profit': 0,
+            }
 
+        # Process data in windows
+        for index in range(min_window, len(data)):
             try:
+                # Get current window of data for analysis
+                current_window = data.iloc[max(0, index-min_window):index+1]
+
+                if len(current_window) < min_window:
+                    continue
+
                 # Update strategy market condition
                 self.strategy.update_market_condition(current_window)
 
-                # Generate signals only if we have enough data
+                # Generate signals
                 signal = self.strategy.generate_signals(current_window)
 
                 # Process open positions
@@ -162,6 +200,7 @@ class Backtester:
                             current_window.iloc[-1],
                             current_equity
                         )
+
             except Exception as e:
                 print(f"Error at bar {index}: {str(e)}")
                 continue

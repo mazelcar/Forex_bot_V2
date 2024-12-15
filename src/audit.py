@@ -528,12 +528,26 @@ def audit_backtest() -> None:
         symbol = "EURUSD"
         timeframe = "M5"
         end_date = datetime(2024, 12, 12, 23, 0)  # Last known good data point
-        start_date = end_date - timedelta(hours=8)  # Just 4 hours for testing
+        start_date = end_date - timedelta(hours=8)  # Just 8 hours for testing
 
         logger.info(f"\nTesting short timeframe backtest:")
         logger.info(f"Symbol: {symbol}")
         logger.info(f"Timeframe: {timeframe}")
         logger.info(f"Period: {start_date} to {end_date}")
+        logger.info(f"MT5 Connection Status: {mt5_handler.connected}")
+
+        # ENHANCED: Get and log market session status with more detail
+        current_market_status = mt5_handler.get_market_status()
+        logger.info("\nDetailed Market Session Analysis:")
+        logger.info(f"Overall Market Status: {current_market_status['overall_status']}")
+        for market, status in current_market_status['status'].items():
+            logger.info(f"{market} Session: {'OPEN' if status else 'CLOSED'}")
+            if status:
+                logger.info(f"  Active Trading Hours: {market}")
+                if market in strategy.config.get('sessions', {}):
+                    session_info = strategy.config['sessions'][market]
+                    logger.info(f"  Start Time: {session_info.get('start_time', 'Not Set')}")
+                    logger.info(f"  End Time: {session_info.get('end_time', 'Not Set')}")
 
         test_data = mt5_handler.get_historical_data(
             symbol=symbol,
@@ -546,40 +560,271 @@ def audit_backtest() -> None:
             # Add symbol column to data
             test_data['symbol'] = symbol
 
-            logger.info(f"Retrieved {len(test_data)} data points")
-            logger.info(f"Columns available: {list(test_data.columns)}")
+            # ENHANCED: Initial Data Analysis with detailed statistics
+            logger.info("\nEnhanced Initial Data Analysis:")
+            logger.info(f"Total data points: {len(test_data)}")
+            logger.info(f"Time range: {test_data['time'].min()} to {test_data['time'].max()}")
+            time_diffs = test_data['time'].diff()
+            logger.info(f"Average time between bars: {time_diffs.mean()}")
+            logger.info(f"Time gaps > 5min: {(time_diffs > pd.Timedelta('5min')).sum()}")
+            if (time_diffs > pd.Timedelta('5min')).any():
+                gap_times = test_data['time'][time_diffs > pd.Timedelta('5min')]
+                logger.info("Gap occurrences:")
+                for t in gap_times:
+                    logger.info(f"  Gap at: {t}")
 
-            # Test backtester components
+            # Data Quality Checks with Enhanced Analysis
+            logger.info("\nEnhanced Data Quality Checks:")
+            price_columns = ['open', 'high', 'low', 'close']
+            volume_columns = ['tick_volume']
+
+            # Price Data Analysis
+            logger.info("\nPrice Data Analysis:")
+            for col in price_columns:
+                nulls = test_data[col].isnull().sum()
+                zeros = (test_data[col] == 0).sum()
+                mean_val = test_data[col].mean()
+                std_val = test_data[col].std()
+                logger.info(f"\n{col.upper()} Analysis:")
+                logger.info(f"  Basic Statistics:")
+                logger.info(f"    Null values: {nulls}")
+                logger.info(f"    Zero values: {zeros}")
+                logger.info(f"    Min: {test_data[col].min():.5f}")
+                logger.info(f"    Max: {test_data[col].max():.5f}")
+                logger.info(f"    Mean: {mean_val:.5f}")
+                logger.info(f"    Std Dev: {std_val:.5f}")
+
+                # Price Movement Analysis
+                moves = test_data[col].diff().abs()
+                logger.info(f"  Price Movement Analysis:")
+                logger.info(f"    Average Movement: {moves.mean():.5f}")
+                logger.info(f"    Max Movement: {moves.max():.5f}")
+                logger.info(f"    Movement > 10 pips: {(moves > 0.001).sum()}")
+
+            # Volume Analysis
+            logger.info("\nVolume Data Analysis:")
+            for col in volume_columns:
+                mean_vol = test_data[col].mean()
+                std_vol = test_data[col].std()
+                logger.info(f"\n{col.upper()} Analysis:")
+                logger.info(f"  Mean Volume: {mean_vol:.2f}")
+                logger.info(f"  Std Dev Volume: {std_vol:.2f}")
+                logger.info(f"  Coefficient of Variation: {(std_vol/mean_vol if mean_vol > 0 else 0):.4f}")
+                logger.info(f"  Zero Volume Bars: {(test_data[col] == 0).sum()}")
+                logger.info(f"  Low Volume Bars (<25% mean): {(test_data[col] < mean_vol * 0.25).sum()}")
+                logger.info(f"  High Volume Bars (>200% mean): {(test_data[col] > mean_vol * 2).sum()}")
+
+            # Strategy Configuration and Required Bars
+            logger.info("\nStrategy Configuration Analysis:")
+            logger.info(f"Strategy name: {strategy.name}")
+            logger.info(f"Fast EMA period: {strategy.fast_ema_period}")
+            logger.info(f"Slow EMA period: {strategy.slow_ema_period}")
+            logger.info(f"RSI period: {strategy.rsi_period}")
+            logger.info(f"Volume period: {strategy.volume_period}")
             logger.info("\nTesting data windowing...")
             window_size = 100
             test_window = test_data.iloc[0:min(window_size, len(test_data))]
-            logger.info(f"Window size: {len(test_window)}")
-            logger.info(f"Window columns: {list(test_window.columns)}")
-
-            logger.info("\nTesting strategy update...")
-            strategy.update_market_condition(test_window)
-            logger.info("Strategy updated with window data")
-
-            logger.info("\nTesting signal generation...")
+            logger.info("\nEnhanced Basic Data Validation:")
             try:
-                signal = strategy.generate_signals(test_window)
-                logger.info(f"Generated signal: {signal}")
+                min_required_bars = max(
+                    strategy.fast_ema_period * 2,
+                    strategy.slow_ema_period * 2,
+                    strategy.rsi_period * 2,
+                    strategy.volume_period * 2,
+                    50
+                )
+                logger.info(f"Minimum Required Bars Detail:")
+                logger.info(f"  Fast EMA warmup: {strategy.fast_ema_period * 2}")
+                logger.info(f"  Slow EMA warmup: {strategy.slow_ema_period * 2}")
+                logger.info(f"  RSI warmup: {strategy.rsi_period * 2}")
+                logger.info(f"  Volume warmup: {strategy.volume_period * 2}")
+                logger.info(f"  Base minimum: 50")
+                logger.info(f"  Final required: {min_required_bars}")
+                logger.info(f"  Available bars: {len(test_data)}")
+                logger.info(f"  Sufficient data: {len(test_data) >= min_required_bars}")
+
+                basic_validation = strategy._validate_basic_data(test_data)
+                logger.info(f"\nBasic Validation Results:")
+                logger.info(f"Overall Pass: {basic_validation['overall_pass']}")
+                if not basic_validation['overall_pass']:
+                    logger.error("Validation Errors:")
+                    for msg in basic_validation['error_messages']:
+                        logger.error(f"  {msg}")
             except Exception as e:
-                logger.error(f"Signal generation failed: {str(e)}")
+                logger.error(f"Basic validation failed: {str(e)}")
+                logger.error(f"Data shape: {test_data.shape}")
+                logger.error(f"Data columns: {test_data.columns}")
+
+            # Enhanced Signal Validation Parameters
+            logger.info("\nDetailed Signal Validation Parameters:")
+            try:
+                logger.info("\nFilter Configurations:")
+                filters = strategy.config['filters']
+                for filter_name, filter_config in filters.items():
+                    logger.info(f"\n{filter_name.upper()} Filter:")
+                    logger.info(f"  Configuration: {filter_config}")
+                    if isinstance(filter_config, dict):
+                        if filter_config.get('dynamic_adjustment', {}).get('enabled'):
+                            logger.info(f"  Dynamic Adjustment: Enabled")
+                            logger.info(f"  Adjustment Parameters: {filter_config['dynamic_adjustment']}")
+
+            except Exception as e:
+                logger.error(f"Error analyzing filters: {str(e)}")
+
+            # Enhanced Signal Generation and Validation
+            logger.info("\nEnhanced Signal Analysis:")
+            try:
+                # Generate signals with market condition context
+                market_condition = strategy._analyze_market_condition(test_window)
+                logger.info("\nMarket Condition Context:")
+                logger.info(f"Phase: {market_condition.get('phase', 'Unknown')}")
+                logger.info(f"Volatility: {market_condition.get('volatility', 'Unknown')}")
+                logger.info(f"Trend Strength: {market_condition.get('trend_strength', 'Unknown')}")
+
+                # Generate and analyze signal
+                signal = strategy.generate_signals(test_window)
+                if signal:
+                    logger.info("\nDetailed Signal Properties:")
+                    for key, value in signal.items():
+                        logger.info(f"  {key}: {value}")
+
+                    # Enhanced validation logging
+                    logger.info("\nSignal Validation Process:")
+                    market_data = test_window.iloc[-1]
+
+                    # 1. Spread Check
+                    current_spread = float(market_data.get('spread', float('inf')))
+                    max_spread = strategy.config['filters']['spread']['max_spread_pips']
+                    logger.info(f"\nSpread Validation:")
+                    logger.info(f"  Current Spread: {current_spread}")
+                    logger.info(f"  Maximum Allowed: {max_spread}")
+                    logger.info(f"  Spread Valid: {current_spread <= max_spread}")
+
+                    # 2. Market Session Check
+                    logger.info(f"\nSession Validation:")
+                    session_valid = strategy._is_valid_session(market_data)
+                    logger.info(f"  Current Time: {market_data.get('time')}")
+                    logger.info(f"  Session Valid: {session_valid}")
+
+                    # 3. Signal Strength Check
+                    logger.info(f"\nStrength Validation:")
+                    min_strength = 0.7  # From strategy config
+                    signal_strength = float(signal.get('strength', 0))
+                    logger.info(f"  Signal Strength: {signal_strength}")
+                    logger.info(f"  Minimum Required: {min_strength}")
+                    logger.info(f"  Strength Valid: {signal_strength >= min_strength}")
+
+                    # Overall validation result
+                    is_valid = strategy.validate_signal(signal, market_data)
+                    logger.info(f"\nFinal Validation Result: {is_valid}")
+
+                    if is_valid:
+                        try:
+                            # Enhanced position parameter logging
+                            logger.info("\nPosition Calculation Details:")
+                            position_size = strategy.calculate_position_size({'balance': 10000}, test_window)
+                            sl = strategy.calculate_stop_loss(test_window, signal)
+                            tp = strategy.calculate_take_profit(test_window, signal)
+
+                            logger.info(f"Position Parameters:")
+                            logger.info(f"  Size: {position_size}")
+                            logger.info(f"  Entry: {signal.get('entry_price')}")
+                            logger.info(f"  Stop Loss: {sl}")
+                            logger.info(f"  Take Profit: {tp}")
+                            if sl and tp and signal.get('entry_price'):
+                                risk = abs(signal['entry_price'] - sl) * position_size
+                                reward = abs(tp - signal['entry_price']) * position_size
+                                logger.info(f"  Risk Amount: {risk:.2f}")
+                                logger.info(f"  Reward Amount: {reward:.2f}")
+                                logger.info(f"  Risk-Reward Ratio: {(reward/risk if risk > 0 else 'N/A')}")
+                        except Exception as e:
+                            logger.error(f"Position calculation error: {str(e)}")
+                else:
+                    logger.info("No signal generated")
+                    logger.info("Analyzing market conditions preventing signal generation:")
+                    logger.info(f"  Market Phase: {market_condition['phase']}")
+                    logger.info(f"  Volatility Level: {market_condition['volatility']}")
+                    logger.info(f"  Trend Strength: {market_condition['trend_strength']}")
+
+            except Exception as e:
+                logger.error(f"Signal analysis failed: {str(e)}")
                 logger.error(f"Data shape: {test_window.shape}")
                 logger.error(f"Data columns: {test_window.columns}")
 
-            logger.info("\nTesting position processing...")
-            equity = backtester._process_positions(test_window.iloc[-1], 10000)
-            logger.info(f"Processed positions, equity: {equity}")
+            # Enhanced Simulation Analysis
+            logger.info("\nRunning enhanced simulation analysis...")
+            try:
+                sim_data = test_data.copy()
+                sim_data['symbol'] = symbol
 
-            logger.info("\nRunning full backtest simulation...")
-            logger.info("Creating simulation data...")
-            sim_data = test_data.copy()  # Create a copy for simulation
-            sim_data['symbol'] = symbol   # Ensure symbol column exists
+                # Pre-simulation signal analysis
+                logger.info("\nPre-simulation Signal Analysis:")
+                all_signals = []
+                validation_stats = {
+                    'total_generated': 0,
+                    'spread_rejected': 0,
+                    'session_rejected': 0,
+                    'strength_rejected': 0,
+                    'fully_validated': 0,
+                    'buy_signals': 0,
+                    'sell_signals': 0
+                }
 
-            results = backtester._run_simulation(sim_data)
-            logger.info(f"Backtest results: {results}")
+                # Analyze each potential signal
+                for i in range(len(sim_data) - min_required_bars):
+                    window = sim_data.iloc[i:i+min_required_bars]
+                    sig = strategy.generate_signals(window)
+
+                    if sig and sig['type'] != 'NONE':
+                        validation_stats['total_generated'] += 1
+
+                        if sig['type'] == 'BUY':
+                            validation_stats['buy_signals'] += 1
+                        elif sig['type'] == 'SELL':
+                            validation_stats['sell_signals'] += 1
+
+                        market_data = window.iloc[-1]
+
+                        # Check validation criteria
+                        current_spread = float(market_data.get('spread', float('inf')))
+                        if current_spread > max_spread:
+                            validation_stats['spread_rejected'] += 1
+                            continue
+
+                        if not strategy._is_valid_session(market_data):
+                            validation_stats['session_rejected'] += 1
+                            continue
+
+                        if float(sig.get('strength', 0)) < 0.7:
+                            validation_stats['strength_rejected'] += 1
+                            continue
+
+                        validation_stats['fully_validated'] += 1
+                        all_signals.append(sig)
+
+                # Log validation statistics
+                logger.info("\nSignal Validation Statistics:")
+                for key, value in validation_stats.items():
+                    logger.info(f"  {key}: {value}")
+                if validation_stats['total_generated'] > 0:
+                    logger.info(f"  Validation Rate: {(validation_stats['fully_validated']/validation_stats['total_generated']*100):.2f}%")
+                    logger.info(f"  Buy/Sell Ratio: {(validation_stats['buy_signals']/validation_stats['sell_signals'] if validation_stats['sell_signals'] > 0 else 'N/A')}")
+
+                # Run simulation
+                results = backtester._run_simulation(sim_data)
+                logger.info(f"\nSimulation Results: {results}")
+
+                # Post-simulation analysis
+                logger.info("\nPost-simulation Analysis:")
+                logger.info(f"Signal to Trade Conversion Rate: {(results.get('total_trades', 0)/validation_stats['fully_validated']*100 if validation_stats['fully_validated'] > 0 else 0):.2f}%")
+                if results.get('total_trades', 0) > 0:
+                    logger.info(f"Win Rate: {(results.get('winning_trades', 0)/results.get('total_trades', 0)*100):.2f}%")
+                    logger.info(f"Average Profit per Trade: {(results.get('total_profit', 0)/results.get('total_trades', 0)):.2f}")
+
+            except Exception as e:
+                logger.error(f"Simulation failed: {str(e)}")
+                logger.error(f"Simulation data shape: {sim_data.shape}")
+                logger.error(f"Simulation data columns: {sim_data.columns}")
 
         else:
             logger.error("Failed to retrieve test data")
@@ -590,7 +835,10 @@ def audit_backtest() -> None:
 
     except Exception as e:
         logger.error(f"Backtest audit failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
+
 
 def audit_run_backtest() -> None:
    """Audit backtest runtime functionality."""
