@@ -87,6 +87,9 @@ class Backtester:
 
             print(f"Retrieved {len(data)} data points")
 
+            # Add symbol column - ADDED THIS LINE
+            data['symbol'] = symbol
+
             # Add spread to data
             if self.spread > 0:
                 data['ask'] = data['close'] + self.spread
@@ -115,7 +118,7 @@ class Backtester:
         # Calculate minimum required window size
         min_window = max(
             self.strategy.slow_ema_period * 2,  # For EMA calculation
-            200,  # For trend analysis
+            30,  # For trend analysis
             self.strategy.rsi_period * 2,  # For RSI
             self.strategy.volume_period * 2,  # For volume analysis
             20  # Minimum baseline
@@ -235,10 +238,15 @@ class Backtester:
             equity: Current equity
         """
         # Calculate position size
-        size = self.strategy.calculate_position_size({'balance': equity})
+        size = self.strategy.calculate_position_size(
+            {'balance': equity},
+            pd.DataFrame([current_bar])  # Create DataFrame from current bar
+        )
+
 
         # Get entry price
         entry_price = current_bar['ask'] if signal['type'] == 'BUY' else current_bar['bid']
+
 
         # Calculate stop loss and take profit
         sl = self.strategy.calculate_stop_loss(
@@ -281,7 +289,9 @@ class Backtester:
                 'win_rate': 0,
                 'profit_factor': 0,
                 'total_profit': 0,
-                'max_drawdown': 0
+                'max_drawdown': 0,
+                'return_pct': 0.0,
+                'sharpe_ratio': 0.0
             }
 
         # Basic metrics

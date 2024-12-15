@@ -12,7 +12,7 @@
         "moving_averages": {
             "fast_ma": {
                 "type": "EMA",
-                "period": 8,
+                "period": 5,
                 "source": "close",
                 "dynamic_adjustment": {
                     "enabled": true,
@@ -25,7 +25,7 @@
             },
             "slow_ma": {
                 "type": "EMA",
-                "period": 21,
+                "period": 13,
                 "source": "close",
                 "dynamic_adjustment": {
                     "enabled": true,
@@ -38,13 +38,13 @@
             }
         },
         "rsi": {
-            "period": 14,
+            "period": 7,
             "source": "close",
             "dynamic_levels": {
                 "center_line": {
                     "base": 50,
                     "dynamic_adjustment": true,
-                    "adjustment_range": 5,
+                    "adjustment_range": 3,
                     "market_condition_modifiers": {
                         "trend_strength": [-3, 3],
                         "volatility": [-2, 2],
@@ -52,15 +52,15 @@
                     }
                 },
                 "extreme_levels": {
-                    "base_overbought": 70,
-                    "base_oversold": 30,
+                    "base_overbought": 65,
+                    "base_oversold": 35,
                     "dynamic_adjustment": true,
                     "adjustment_range": 5
                 }
             }
         },
         "volume": {
-            "period": 20,
+            "period": 10,
             "volume_ma": {
                 "type": "SMA",
                 "period": 20
@@ -70,8 +70,8 @@
                 "calculation": "standard_deviation",
                 "lookback_periods": 100,
                 "threshold_multipliers": {
-                    "high": 2.0,
-                    "medium": 1.5,
+                    "high": 3,
+                    "medium": 2.0,
                     "low": 1.2
                 }
             }
@@ -113,7 +113,7 @@
                 "indicator1": "fast_ma",
                 "indicator2": "slow_ma",
                 "confirmation_rules": {
-                    "minimum_cross_strength": 0.5,
+                    "minimum_cross_strength": 1.2,
                     "minimum_separation": "dynamic"
                 }
             },
@@ -139,7 +139,7 @@
                 "indicator1": "fast_ma",
                 "indicator2": "slow_ma",
                 "confirmation_rules": {
-                    "minimum_cross_strength": 0.5,
+                    "minimum_cross_strength": 1.0,
                     "minimum_separation": "dynamic"
                 }
             },
@@ -163,7 +163,7 @@
 
     "filters": {
         "spread": {
-            "max_spread_pips": 3,
+            "max_spread_pips": 2,
             "dynamic_adjustment": {
                 "enabled": true,
                 "volatility_based": true,
@@ -179,6 +179,11 @@
                     "lookback_periods": 100
                 }
             }
+        },
+        "trend_filter": {
+            "enabled": true,
+            "ema_period": 200,
+            "condition": "price_above_for_buy_below_for_sell"
         }
     },
 
@@ -215,11 +220,11 @@
         "calculation": {
             "weights": {
                 "ema": {
-                    "base": 0.4,
+                    "base": 0.3,
                     "dynamic_adjustment": true
                 },
                 "rsi": {
-                    "base": 0.3,
+                    "base": 0.4,
                     "dynamic_adjustment": true
                 },
                 "volume": {

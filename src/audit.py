@@ -331,6 +331,32 @@ def audit_mt5() -> None:
                     logger.info("Testing with detailed parameters:")
                     logger.info(f"Start date: {start_date}")
                     logger.info(f"End date: {end_date}")
+                    # ADDED: Test specific data window that matches backtest requirements
+                    logger.info("\n=== Testing Strategy Data Window Requirements ===")
+                    test_start = end_date - timedelta(days=5)  # ADDED: Match backtest warmup period
+                    logger.info(f"Strategy Test Period:")  # ADDED: Log strategy test period
+                    logger.info(f"• Start: {test_start}")  # ADDED: Log start time
+                    logger.info(f"• End: {end_date}")  # ADDED: Log end time
+                    logger.info(f"• Total Days: {(end_date - test_start).days}")
+
+                    # ADDED: Get data specifically for strategy window
+                    strategy_data = mt5_handler.get_historical_data(
+                        symbol="EURUSD",
+                        timeframe="M5",
+                        start_date=test_start,
+                        end_date=end_date
+                    )
+
+                    # ADDED: Log strategy data details
+                    if strategy_data is not None:
+                        logger.info("\nStrategy Data Analysis:")
+                        logger.info(f"• Total Bars Retrieved: {len(strategy_data)}")
+                        logger.info(f"• First Bar Time: {strategy_data['time'].min()}")
+                        logger.info(f"• Last Bar Time: {strategy_data['time'].max()}")
+                        logger.info(f"• Hours Covered: {(strategy_data['time'].max() - strategy_data['time'].min()).total_seconds() / 3600:.2f}")
+                        logger.info(f"• Bars Per Day Avg: {len(strategy_data) / (end_date - test_start).days:.2f}")
+                    else:
+                        logger.error("Failed to retrieve strategy test data")
 
                     for tf in scenario['params']['timeframes']:
                         data = mt5_handler.get_historical_data(
@@ -501,8 +527,8 @@ def audit_backtest() -> None:
         # Test short timeframe first
         symbol = "EURUSD"
         timeframe = "M5"
-        end_date = datetime.now()
-        start_date = end_date - timedelta(hours=4)  # Just 4 hours for testing
+        end_date = datetime(2024, 12, 12, 23, 0)  # Last known good data point
+        start_date = end_date - timedelta(hours=8)  # Just 4 hours for testing
 
         logger.info(f"\nTesting short timeframe backtest:")
         logger.info(f"Symbol: {symbol}")
@@ -567,106 +593,161 @@ def audit_backtest() -> None:
         raise
 
 def audit_run_backtest() -> None:
-    """Audit backtest runtime functionality."""
-    print("\n=== Starting Run Backtest Audit ===")
-    print("Setting up logging...")
+   """Audit backtest runtime functionality."""
+   print("\n=== Starting Run Backtest Audit ===")
+   print("Setting up logging...")
 
-    logger, log_dir, timestamp = setup_audit_logging()
-    logger.info("Starting Run Backtest Audit")
+   logger, log_dir, timestamp = setup_audit_logging()
+   logger.info("Starting Run Backtest Audit")
 
-    try:
-        # Initialize components
-        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
-        from src.strategy.backtesting import Backtester
-        from src.core.mt5 import MT5Handler
+   try:
+       # Initialize components
+       from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+       from src.strategy.backtesting import Backtester
+       from src.core.mt5 import MT5Handler
 
-        strategy_config = str(Path("config/strategy.json"))
-        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
-        logger.info("Strategy instance created")
+       strategy_config = str(Path("config/strategy.json"))
+       strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
+       logger.info("Strategy instance created")
 
-        backtester = Backtester(
-            strategy=strategy,
-            initial_balance=10000,
-            commission=2.0,
-            spread=0.0001
-        )
-        logger.info("Backtester instance created")
+       backtester = Backtester(
+           strategy=strategy,
+           initial_balance=10000,
+           commission=2.0,
+           spread=0.0001
+       )
+       logger.info("Backtester instance created")
 
-        mt5_handler = MT5Handler()
-        logger.info("MT5Handler instance created")
+       mt5_handler = MT5Handler()
+       logger.info("MT5Handler instance created")
 
-        # Get small sample of test data
-        symbol = "EURUSD"
-        timeframe = "M5"
-        end_date = datetime.now()
-        start_date = end_date - timedelta(hours=1)  # Just 1 hour for testing
+       # Get sample data for testing - increased to 4 hours
+       symbol = "EURUSD"
+       timeframe = "M5"
+       end_date = datetime.now()
+       start_date = end_date - timedelta(hours=4)  # Changed from 1 to 4 hours
 
-        logger.info(f"\nFetching test data:")
-        logger.info(f"Symbol: {symbol}")
-        logger.info(f"Timeframe: {timeframe}")
-        logger.info(f"Period: {start_date} to {end_date}")
+       logger.info(f"\nFetching test data:")
+       logger.info(f"Symbol: {symbol}")
+       logger.info(f"Timeframe: {timeframe}")
+       logger.info(f"Period: {start_date} to {end_date}")
 
-        data = mt5_handler.get_historical_data(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_date=start_date,
-            end_date=end_date
-        )
+       data = mt5_handler.get_historical_data(
+           symbol=symbol,
+           timeframe=timeframe,
+           start_date=start_date,
+           end_date=end_date
+       )
 
-        if data is not None:
-            # Add symbol column
-            data['symbol'] = symbol
+       if data is not None:
+           # Add symbol column first
+           data['symbol'] = symbol
 
-            logger.info(f"Retrieved {len(data)} data points")
-            logger.info(f"Columns: {list(data.columns)}")
+           # Log data structure after adding symbol
+           logger.info("Initial data structure:")
+           logger.info(f"Shape: {data.shape}")
+           logger.info(f"Columns: {list(data.columns)}")
+           logger.info(f"First row:\n{data.iloc[0]}")
 
-            # Test windowing
-            logger.info("\nTesting data windowing:")
-            current_window = data.iloc[0:20]  # Get first 20 bars
-            logger.info(f"Window size: {len(current_window)}")
-            logger.info(f"Window columns: {list(current_window.columns)}")
+           # Now verify required columns
+           required_columns = ['time', 'open', 'high', 'low', 'close', 'tick_volume', 'symbol']
+           logger.info("\nVerifying required columns:")
+           missing_columns = [col for col in required_columns if col not in data.columns]
 
-            # Test market condition update
-            logger.info("\nTesting market condition update:")
-            try:
-                strategy.update_market_condition(current_window)
-                logger.info("Market condition updated successfully")
-                logger.info(f"Current condition: {strategy.current_market_condition}")
-            except Exception as e:
-                logger.error(f"Market condition update failed: {str(e)}")
+           # Log missing columns if any
+           if missing_columns:
+               logger.error(f"Missing required columns: {missing_columns}")
+               for col in missing_columns:
+                   logger.error(f"Column '{col}' is required but not found in data")
+               raise ValueError(f"Data missing required columns: {missing_columns}")
 
-            # Test signal generation
-            logger.info("\nTesting signal generation:")
-            try:
-                signal = strategy.generate_signals(current_window)
-                logger.info(f"Signal generated: {signal}")
-            except Exception as e:
-                logger.error(f"Signal generation failed: {str(e)}")
-                logger.error(f"Current window head:\n{current_window.head()}")
+           # Verify symbol column was added correctly
+           logger.info("\nVerifying symbol column addition:")
+           logger.info(f"Symbol column exists: {('symbol' in data.columns)}")
+           logger.info(f"Symbol column value: {data['symbol'].iloc[0]}")
 
-            # Test validation
-            logger.info("\nTesting signal validation:")
-            if signal:
-                try:
-                    is_valid = strategy.validate_signal(signal, current_window.iloc[-1])
-                    logger.info(f"Signal validation result: {is_valid}")
-                except Exception as e:
-                    logger.error(f"Signal validation failed: {str(e)}")
+           logger.info(f"Retrieved {len(data)} data points")
+           logger.info(f"Columns: {list(data.columns)}")
 
-            # Test simulation
-            logger.info("\nTesting simulation run:")
-            try:
-                results = backtester._run_simulation(current_window)
-                logger.info(f"Simulation results: {results}")
-            except Exception as e:
-                logger.error(f"Simulation failed: {str(e)}")
+           # Test windowing with enhanced error checking
+           logger.info("\nTesting data windowing:")
+           try:
+               if len(data) < 20:
+                   logger.error(f"Insufficient data points. Found {len(data)}, need at least 20")
+                   raise ValueError("Insufficient data points for windowing")
 
-        logger.info("\nRun Backtest audit completed")
-        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+               current_window = data.iloc[0:20]  # Get first 20 bars
+               logger.info(f"Window size: {len(current_window)}")
+               logger.info(f"Window columns: {list(current_window.columns)}")
 
-    except Exception as e:
-        logger.error(f"Run Backtest audit failed: {str(e)}")
-        raise
+               # Verify window data integrity
+               logger.info("Window data validation:")
+               logger.info(f"Window contains nulls: {current_window.isnull().any().any()}")
+               logger.info(f"Window symbol column check: {current_window['symbol'].nunique()} unique values")
+
+           except Exception as e:
+               logger.error(f"Window creation failed: {str(e)}")
+               logger.error(f"Window data shape: {data.shape}")
+               raise
+
+           # Test market condition update
+           logger.info("\nTesting market condition update:")
+           try:
+               strategy.update_market_condition(current_window)
+               logger.info("Market condition updated successfully")
+               logger.info(f"Current condition: {strategy.current_market_condition}")
+           except Exception as e:
+               logger.error(f"Market condition update failed: {str(e)}")
+               logger.error("Data used for update:")
+               logger.error(f"Shape: {current_window.shape}")
+               logger.error(f"Columns: {current_window.columns}")
+               raise
+
+           # Test signal generation with enhanced error checking
+           logger.info("\nTesting signal generation:")
+           try:
+               # Pre-signal generation data validation
+               logger.info("Validating data for signal generation:")
+               for col in ['open', 'high', 'low', 'close', 'tick_volume', 'symbol']:
+                   if col not in current_window.columns:
+                       raise ValueError(f"Missing required column for signal generation: {col}")
+
+               signal = strategy.generate_signals(current_window)
+               logger.info(f"Signal generated: {signal}")
+           except Exception as e:
+               logger.error(f"Signal generation failed: {str(e)}")
+               logger.error(f"Data used for signal generation:")
+               logger.error(f"Shape: {current_window.shape}")
+               logger.error(f"Columns: {current_window.columns}")
+               logger.error(f"First row:\n{current_window.iloc[0]}")
+               raise
+
+           # Test validation
+           logger.info("\nTesting signal validation:")
+           if signal:
+               try:
+                   is_valid = strategy.validate_signal(signal, current_window.iloc[-1])
+                   logger.info(f"Signal validation result: {is_valid}")
+               except Exception as e:
+                   logger.error(f"Signal validation failed: {str(e)}")
+
+           # Test simulation
+           logger.info("\nTesting simulation run:")
+           try:
+               results = backtester._run_simulation(current_window)
+               logger.info(f"Simulation results: {results}")
+           except Exception as e:
+               logger.error(f"Simulation failed: {str(e)}")
+
+       else:
+           logger.error("Failed to retrieve test data")
+
+       logger.info("\nRun Backtest audit completed")
+       print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
+
+   except Exception as e:
+       logger.error(f"Run Backtest audit failed: {str(e)}")
+       raise
 
 def audit_calculations() -> None:
     """Audit strategy calculations."""

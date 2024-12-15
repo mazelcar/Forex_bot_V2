@@ -383,7 +383,7 @@ class Strategy(ABC):
                 return False
 
             # Signal strength validation
-            min_strength = 0.5  # Can be configured
+            min_strength = 0.7  # Can be configured
             signal_strength = float(signal.get('strength', 0))  # Convert to float
 
             if signal_strength < min_strength:

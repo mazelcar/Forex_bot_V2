@@ -4,193 +4,380 @@ This module implements a trading strategy that combines:
 1. Dynamic EMA crossovers
 2. RSI confirmation with adaptive levels
 3. Volume analysis with smart thresholds
-
-The strategy adapts its parameters based on market conditions and includes:
-- Volatility-based parameter adjustment
-- Multiple timeframe analysis
-- Advanced risk management
-
-Author: mazelcar
-Created: December 2024
 """
 
-from typing import Dict, List, Optional, Union, Tuple
+from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 from .base import Strategy
 
 class MA_RSI_Volume_Strategy(Strategy):
-    """Trading strategy using Moving Averages, RSI, and Volume analysis."""
-
     def __init__(self, config_file: str):
-        """Initialize the strategy.
-
-        Args:
-            config_file: Path to strategy configuration JSON
-        """
         super().__init__(config_file)
 
-        # Initialize indicator parameters
         self.fast_ema_period = self.config['indicators']['moving_averages']['fast_ma']['period']
         self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['period']
         self.rsi_period = self.config['indicators']['rsi']['period']
         self.volume_period = self.config['indicators']['volume']['period']
 
-        # Initialize adaptive thresholds
         self.rsi_center = self.config['indicators']['rsi']['dynamic_levels']['center_line']['base']
         self.rsi_ob = self.config['indicators']['rsi']['dynamic_levels']['extreme_levels']['base_overbought']
         self.rsi_os = self.config['indicators']['rsi']['dynamic_levels']['extreme_levels']['base_oversold']
 
-        # Track current market phase
         self.market_phase = "unknown"
         self.last_signals: Dict[str, Dict] = {}
+        self.risk_percent = 0.01  # Risk 1% per trade
+        self.default_pip_value_per_lot = 10.0  # For EURUSD
+        self.point_value = 0.0001  # EURUSD point
 
     def _calculate_volatility(self, data: pd.DataFrame) -> float:
-        """Calculate current market volatility using ATR.
-
-        Args:
-            data: Market data for volatility calculation
-
-        Returns:
-            Current ATR value
-        """
         return self._calculate_atr(data, period=14)
 
     def _calculate_atr(self, data: pd.DataFrame, period: int = 14) -> float:
-        """Calculate Average True Range.
+        """Calculate Average True Range."""
+        try:
+            # Ensure we have enough data
+            if len(data) < period + 1:
+                return 0.0
 
-        Args:
-            data: Market data
-            period: ATR period
+            high = data['high'].values
+            low = data['low'].values
+            close = data['close'].values
 
-        Returns:
-            ATR value
-        """
-        high = data['high']
-        low = data['low']
-        close = data['close']
+            # Calculate the three differences
+            tr1 = high[1:] - low[1:]  # Current high - current low
+            tr2 = abs(high[1:] - close[:-1])  # Current high - previous close
+            tr3 = abs(low[1:] - close[:-1])  # Current low - previous close
 
-        tr1 = high - low
-        tr2 = abs(high - close.shift())
-        tr3 = abs(low - close.shift())
+            # Stack the differences and find the maximum
+            true_ranges = np.vstack([tr1, tr2, tr3])
+            true_range = np.max(true_ranges, axis=0)
 
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr = tr.rolling(window=period).mean()
+            # Calculate ATR
+            atr = np.mean(true_ranges[-period:])
+            return float(atr) if not np.isnan(atr) else 0.0
 
-        return atr.iloc[-1]
+        except Exception as e:
+            print(f"Error calculating ATR: {str(e)}")
+            return 0.0
 
     def _adjust_parameters(self) -> None:
-        """Adjust strategy parameters based on market conditions."""
-        volatility = self.current_volatility
+        """Adjust strategy parameters based on current market conditions."""
+        try:
+            # Use class-level market condition that was already analyzed
+            market_condition = self.current_market_condition
+            volatility = self.current_volatility
 
-        # Adjust MA periods based on volatility
-        if volatility > self.config['market_context']['volatility_measurement']['thresholds']['high']:
-            self.fast_ema_period = self.config['indicators']['moving_averages']['fast_ma']['dynamic_adjustment']['volatility_based']['high_volatility']
-            self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['dynamic_adjustment']['volatility_based']['high_volatility']
-        elif volatility < self.config['market_context']['volatility_measurement']['thresholds']['low']:
-            self.fast_ema_period = self.config['indicators']['moving_averages']['fast_ma']['dynamic_adjustment']['volatility_based']['low_volatility']
-            self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['dynamic_adjustment']['volatility_based']['low_volatility']
-        else:
+            # Adjust periods based on both volatility and market condition
+            if market_condition.get('phase') == 'trending':
+                self.fast_ema_period = min(
+                    self.config['indicators']['moving_averages']['fast_ma']['dynamic_adjustment']['volatility_based']['high_volatility'],
+                    5  # Minimum period
+                )
+                self.rsi_period = max(self.rsi_period, 14)
+            else:  # ranging market
+                self.fast_ema_period = max(
+                    self.config['indicators']['moving_averages']['fast_ma']['period'],
+                    8  # Default period
+                )
+                self.rsi_period = min(self.rsi_period, 10)
+
+            # Adjust based on volatility thresholds from config
+            if volatility > self.config['market_context']['volatility_measurement']['thresholds']['high']:
+                self.fast_ema_period = self.config['indicators']['moving_averages']['fast_ma']['dynamic_adjustment']['volatility_based']['high_volatility']
+                self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['dynamic_adjustment']['volatility_based']['high_volatility']
+            elif volatility < self.config['market_context']['volatility_measurement']['thresholds']['low']:
+                self.fast_ema_period = self.config['indicators']['moving_averages']['fast_ma']['dynamic_adjustment']['volatility_based']['low_volatility']
+                self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['dynamic_adjustment']['volatility_based']['low_volatility']
+
+        except Exception as e:
+            print(f"Error in _adjust_parameters: {str(e)}")
+            # Revert to default periods if there's an error
             self.fast_ema_period = self.config['indicators']['moving_averages']['fast_ma']['period']
             self.slow_ema_period = self.config['indicators']['moving_averages']['slow_ma']['period']
 
-        # Adjust RSI levels based on market phase
-        if self.market_phase == "trending":
-            self.rsi_center += self.config['indicators']['rsi']['dynamic_levels']['center_line']['market_condition_modifiers']['trend_strength'][1]
-        else:
-            self.rsi_center = self.config['indicators']['rsi']['dynamic_levels']['center_line']['base']
-
     def generate_signals(self, data: pd.DataFrame) -> Dict:
-        """Generate trading signals based on strategy rules.
+        # Run basic data validation first
+        validation_results = self._validate_basic_data(data)
 
-        Args:
-            data: Market data for signal generation
-
-        Returns:
-            Dictionary containing signal information
-        """
+        # Only proceed if validation passes
+        if not validation_results['overall_pass']:
+            return {'type': 'NONE', 'strength': 0}
         try:
+            min_periods = max(self.fast_ema_period, self.slow_ema_period, self.rsi_period, 20)
+
+            if len(data) < min_periods:
+                print(f"Insufficient data: {len(data)} < {min_periods}")
+                return {'type': 'NONE', 'strength': 0}
+
             # Calculate indicators
             fast_ema = data['close'].ewm(span=self.fast_ema_period, adjust=False).mean()
             slow_ema = data['close'].ewm(span=self.slow_ema_period, adjust=False).mean()
             rsi = self._calculate_rsi(data['close'])
-            volume_signal = self._analyze_volume_conditions(data)
 
-            # Detect crossovers
+            # Market conditions
+            trend = self._analyze_market_trend(data)
+            volume = self._analyze_volume_conditions(data)
             crossover = self._detect_crossover(fast_ema, slow_ema)
 
-            # Generate signal
-            signal = self._combine_signals(crossover, rsi.iloc[-1], volume_signal)
+            current_rsi = rsi.iloc[-1]
+            current_close = data['close'].iloc[-1]
 
-            # Calculate signal strength
-            signal['strength'] = self._calculate_signal_strength(
-                crossover,
-                rsi.iloc[-1],
-                volume_signal,
-                fast_ema.iloc[-1],
-                slow_ema.iloc[-1]
-            )
+            print("\nDetailed Market Analysis:")
+            print(f"Current Price: {current_close:.5f}")
+            print(f"RSI: {current_rsi:.2f}")
+            print(f"Trend: {trend['direction']} ({trend['strength']})")
+            print(f"Volume Ratio: {volume['volume_ratio']:.2f}")
+            print(f"Signal Type: {crossover['type']}")
 
-            self.last_signals[data['symbol'].iloc[-1]] = signal
+            signal = {'type': 'NONE', 'strength': 0}
+
+            if crossover['type'] == 'BULLISH':
+                print("\nChecking Buy Conditions:")
+                print(f"RSI < 65: {current_rsi < 65} ({current_rsi:.2f})")
+                print(f"RSI > 40: {current_rsi > 40} ({current_rsi:.2f})")
+                print(f"Volume > 0.8: {volume['volume_ratio'] > 0.8} ({volume['volume_ratio']:.2f})")
+                print(f"Valid Trend: {trend['direction'] == 'UP'} ({trend['direction']})")
+                print(f"Trend Strength: {trend['strength']}")
+
+                if (current_rsi < 65 and
+                    current_rsi > 40 and
+                    volume['volume_ratio'] > 0.8 and
+                    trend['direction'] == 'UP'):
+
+                    signal = {
+                        'type': 'BUY',
+                        'strength': crossover['strength'],
+                        'entry_price': current_close
+                    }
+                    print("\nBUY Signal Generated!")
+                    print(f"Entry Price: {current_close:.5f}")
+                    print(f"Signal Strength: {signal['strength']:.2f}")
+
+            elif crossover['type'] == 'BEARISH':
+                print("\nChecking Sell Conditions:")
+                print(f"RSI > 30: {current_rsi > 30} ({current_rsi:.2f})")
+                print(f"RSI < 60: {current_rsi < 60} ({current_rsi:.2f})")
+                print(f"Volume > 0.8: {volume['volume_ratio'] > 0.8} ({volume['volume_ratio']:.2f})")
+                print(f"Valid Trend: {trend['direction'] == 'DOWN'} ({trend['direction']})")
+                print(f"Trend Strength: {trend['strength']}")
+
+                if (current_rsi > 30 and
+                    current_rsi < 60 and
+                    volume['volume_ratio'] > 0.8 and
+                    trend['direction'] == 'DOWN' and
+                    trend['strength'] == 'STRONG' and
+                    abs(crossover['spread']) > 1.0):
+
+                    signal = {
+                        'type': 'SELL',
+                        'strength': crossover['strength'],
+                        'entry_price': current_close
+                    }
+                    print("\nSELL Signal Generated!")
+                    print(f"Entry Price: {current_close:.5f}")
+                    print(f"Signal Strength: {signal['strength']:.2f}")
+
             return signal
 
         except Exception as e:
-            print(f"Error generating signals: {e}")
+            print(f"Error in signal generation: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
             return {'type': 'NONE', 'strength': 0}
 
+
     def _calculate_rsi(self, prices: pd.Series) -> pd.Series:
-        """Calculate RSI indicator.
-
-        Args:
-            prices: Price series
-
-        Returns:
-            RSI values
-        """
         deltas = prices.diff()
         gain = (deltas.where(deltas > 0, 0)).rolling(window=self.rsi_period).mean()
         loss = (-deltas.where(deltas < 0, 0)).rolling(window=self.rsi_period).mean()
-
         rs = gain / loss
         return 100 - (100 / (1 + rs))
 
-    def _analyze_market_condition(self, data: pd.DataFrame) -> Dict:
-        """Analyze current market conditions.
-
-        Args:
-            data: Market data for analysis
-
-        Returns:
-            Dictionary containing market condition assessment
+    def _validate_basic_data(self, data: pd.DataFrame) -> Dict:
         """
-        try:
-            # Calculate ATR for volatility
-            atr = self._calculate_atr(data, period=14)
+        Step 1: Basic Data Validation
+        Validates that we have all required data before proceeding with strategy.
+        """
+        validation_results = {
+            'overall_pass': True,
+            'checks': {},
+            'error_messages': []
+        }
 
-            # Determine trend strength using EMA
+        print("\n========== STEP 1: BASIC DATA VALIDATION ==========")
+
+        # 1. Check if we have enough price data
+        min_required_bars = max(
+            self.fast_ema_period * 2,  # For EMA calculation
+            self.slow_ema_period * 2,  # For EMA calculation
+            self.rsi_period * 2,       # For RSI calculation
+            self.volume_period * 2,    # For volume analysis
+            50                         # Minimum for trend analysis
+        )
+
+        has_enough_data = len(data) >= min_required_bars
+        validation_results['checks']['enough_data'] = has_enough_data
+        print(f"\n1.1 Price Data Check:")
+        print(f"-> Required Bars: {min_required_bars}")
+        print(f"-> Available Bars: {len(data)}")
+        print(f"{'[PASS]' if has_enough_data else '[FAIL]'}: Price Data Check")
+
+        if not has_enough_data:
+            msg = f"Insufficient data: need {min_required_bars}, have {len(data)}"
+            validation_results['error_messages'].append(msg)
+            validation_results['overall_pass'] = False
+
+        # 2. Check if required price columns exist
+        required_columns = ['open', 'high', 'low', 'close']
+        missing_columns = [col for col in required_columns if col not in data.columns]
+        has_required_columns = len(missing_columns) == 0
+        validation_results['checks']['required_columns'] = has_required_columns
+
+        print(f"\n1.2 Required Columns Check:")
+        print(f"-> Looking for: {', '.join(required_columns)}")
+        print(f"-> Found Columns: {', '.join(data.columns)}")
+        print(f"{'[PASS]' if has_required_columns else '[FAIL]'}: Required Columns Check")
+
+
+        if not has_required_columns:
+            msg = f"Missing required columns: {missing_columns}"
+            validation_results['error_messages'].append(msg)
+            validation_results['overall_pass'] = False
+
+        # 3. Check for valid values in price data
+        if has_required_columns:
+            has_valid_prices = not data[required_columns].isnull().any().any()
+            validation_results['checks']['valid_prices'] = has_valid_prices
+
+            print(f"\n1.3 Price Data Quality Check:")
+            if has_valid_prices:
+                print(f"All price data is valid")
+                print("PASS: Price Data Quality Check")
+            else:
+                null_counts = data[required_columns].isnull().sum()
+                print(f"✓ Found null values:")
+                for col in required_columns:
+                    if null_counts[col] > 0:
+                        print(f"  • {col}: {null_counts[col]} null values")
+                print("FAIL: Price Data Quality Check")
+                msg = "Found null values in price data"
+                validation_results['error_messages'].append(msg)
+                validation_results['overall_pass'] = False
+
+        # 4. Check for volume data
+        volume_cols = ['tick_volume', 'real_volume']
+        has_volume = any(col in data.columns for col in volume_cols)
+        validation_results['checks']['has_volume'] = has_volume
+
+        print(f"\n1.4 Volume Data Check:")
+        print(f"Looking for any of: {', '.join(volume_cols)}")
+        if has_volume:
+            found_vol = next(col for col in volume_cols if col in data.columns)
+            valid_volume = not data[found_vol].isnull().any() and (data[found_vol] >= 0).all()
+            print(f"Found {found_vol} data")
+            print(f"Volume data validation: {'Valid' if valid_volume else 'Invalid'}")
+            print("PASS: Volume Data Check")
+        else:
+            print("FAIL: No volume data found")
+            msg = "No volume data available"
+            validation_results['error_messages'].append(msg)
+            validation_results['overall_pass'] = False
+
+        # Print overall validation summary
+        print("\n========== VALIDATION SUMMARY ==========")
+        print(f"Overall Status: {'PASSED' if validation_results['overall_pass'] else 'FAILED'}")
+        if validation_results['error_messages']:
+            print("\nError Messages:")
+            for msg in validation_results['error_messages']:
+                print(f"• {msg}")
+        print("=======================================")
+
+        return validation_results
+
+    def _analyze_market_trend(self, data: pd.DataFrame) -> Dict:
+        """Analyze the market trend using multiple timeframes."""
+        try:
+            # Use shorter periods for trend analysis
+            ema10 = data['close'].ewm(span=10, adjust=False).mean()
+            ema20 = data['close'].ewm(span=20, adjust=False).mean()
+            ema50 = data['close'].ewm(span=50, adjust=False).mean()
+
+            current_price = data['close'].iloc[-1]
+
+            # Calculate price position relative to EMAs
+            price_above_10 = current_price > ema10.iloc[-1]
+            price_above_20 = current_price > ema20.iloc[-1]
+            price_above_50 = current_price > ema50.iloc[-1]
+
+            # Calculate EMA alignment
+            ema_10_above_20 = ema10.iloc[-1] > ema20.iloc[-1]
+            ema_20_above_50 = ema20.iloc[-1] > ema50.iloc[-1]
+
+            # Determine trend direction with adjusted conditions
+            if price_above_10 and price_above_20 and price_above_50 and ema_10_above_20 and ema_20_above_50:
+                direction = 'UP'
+                strength = 'STRONG'
+            elif not price_above_10 and not price_above_20 and not price_above_50 and not ema_10_above_20 and not ema_20_above_50:
+                direction = 'DOWN'
+                strength = 'STRONG'
+            elif (price_above_10 and price_above_20) or (ema_10_above_20 and price_above_20):
+                direction = 'UP'
+                strength = 'MODERATE'
+            elif (not price_above_10 and not price_above_20) or (not ema_10_above_20 and not price_above_20):
+                direction = 'DOWN'
+                strength = 'MODERATE'
+            else:
+                direction = 'MIXED'
+                strength = 'WEAK'
+
+            return {
+                'direction': direction,
+                'strength': strength,
+                'price_above_10': price_above_10,
+                'price_above_20': price_above_20,
+                'price_above_50': price_above_50,
+                'ema_aligned': ema_10_above_20 and ema_20_above_50
+            }
+
+        except Exception as e:
+            print(f"Error analyzing market trend: {str(e)}")
+            return {
+                'direction': 'MIXED',
+                'strength': 'WEAK',
+                'price_above_10': False,
+                'price_above_20': False,
+                'price_above_50': False,
+                'ema_aligned': False
+            }
+
+    def _analyze_market_condition(self, data: pd.DataFrame) -> Dict:
+        try:
+            atr = self._calculate_atr(data, period=14)
             ema_200 = data['close'].ewm(span=200, adjust=False).mean()
-            if len(ema_200) >= 2:  # Make sure we have enough data
+            if len(ema_200) >= 2:
                 current_price = data['close'].iloc[-1]
                 last_ema = ema_200.iloc[-1]
-                if last_ema != 0:  # Prevent division by zero
+                if last_ema != 0:
                     trend_strength = (current_price - last_ema) / last_ema
                 else:
                     trend_strength = 0
             else:
                 trend_strength = 0
 
-            # Analyze volume using tick_volume
             if 'tick_volume' in data.columns:
                 volume = data['tick_volume']
-                volume_sma = volume.rolling(window=20).mean()
-                if len(volume_sma) > 0 and volume_sma.iloc[-1] != 0:
-                    volume_strength = (volume.iloc[-1] / volume_sma.iloc[-1]) - 1
-                else:
-                    volume_strength = 0
+            elif 'real_volume' in data.columns:
+                volume = data['real_volume']
+            else:
+                volume = pd.Series([0])
+
+            volume_sma = volume.rolling(window=20).mean()
+            if len(volume_sma) > 0 and volume_sma.iloc[-1] != 0:
+                volume_strength = (volume.iloc[-1] / volume_sma.iloc[-1]) - 1
             else:
                 volume_strength = 0
 
-            # Determine market phase
             if trend_strength > 0.02:
                 phase = "uptrend"
             elif trend_strength < -0.02:
@@ -204,9 +391,7 @@ class MA_RSI_Volume_Strategy(Strategy):
                 'trend_strength': trend_strength,
                 'volume_strength': volume_strength
             }
-
-        except Exception as e:
-            print(f"Error in market condition analysis: {e}")
+        except:
             return {
                 'phase': 'unknown',
                 'volatility': 0,
@@ -215,179 +400,187 @@ class MA_RSI_Volume_Strategy(Strategy):
             }
 
     def _analyze_volume_conditions(self, data: pd.DataFrame) -> Dict:
-        """Analyze volume conditions.
-
-        Args:
-            data: Market data
-
-        Returns:
-            Volume analysis results
-        """
+        """Analyze volume with more lenient conditions."""
         try:
-            # First try tick_volume, then real_volume
             if 'tick_volume' in data.columns:
                 volume = data['tick_volume']
             elif 'real_volume' in data.columns:
                 volume = data['real_volume']
             else:
-                # If no volume data available, return default values
-                return {
-                    'above_average': True,
-                    'high_volume': False,
-                    'volume_ratio': 1.0
-                }
+                return {'above_average': True, 'high_volume': False, 'volume_ratio': 1.0}
 
-            volume_sma = volume.rolling(window=self.volume_period).mean()
-            volume_std = volume.rolling(window=self.volume_period).std()
+            # Calculate shorter-term volume averages
+            volume_sma = volume.rolling(window=min(self.volume_period, 10)).mean()
+            volume_std = volume.rolling(window=min(self.volume_period, 10)).std()
+
+            if len(volume_sma) == 0 or volume_sma.iloc[-1] == 0:
+                return {'above_average': True, 'high_volume': False, 'volume_ratio': 1.0}
 
             current_volume = volume.iloc[-1]
             sma = volume_sma.iloc[-1]
 
-            if sma == 0:
-                return {
-                    'above_average': True,
-                    'high_volume': False,
-                    'volume_ratio': 1.0
-                }
-
-            upper_threshold = sma + (volume_std.iloc[-1] *
-                self.config['indicators']['volume']['dynamic_thresholds']['threshold_multipliers']['high'])
+            # More lenient volume ratio calculation
+            volume_ratio = current_volume / sma if sma > 0 else 1.0
 
             return {
-                'above_average': current_volume > sma,
-                'high_volume': current_volume > upper_threshold,
-                'volume_ratio': current_volume / sma
+                'above_average': volume_ratio > 0.8,  # More lenient threshold
+                'high_volume': volume_ratio > 1.2,
+                'volume_ratio': volume_ratio
+            }
+        except Exception as e:
+            print(f"Error in volume analysis: {e}")
+            return {'above_average': True, 'high_volume': False, 'volume_ratio': 1.0}
+
+    def _detect_crossover(self, fast_ema: pd.Series, slow_ema: pd.Series) -> Dict:
+        try:
+            # Get recent values
+            fast_values = fast_ema.iloc[-5:].values
+            slow_values = slow_ema.iloc[-5:].values
+
+            # Calculate differences and slopes
+            fast_diff = (fast_values[-1] - fast_values[-2]) * 10000
+            slow_diff = (slow_values[-1] - slow_values[-2]) * 10000
+
+            # Calculate trends
+            fast_trend = (fast_values[-1] - fast_values[0]) * 10000
+            slow_trend = (slow_values[-1] - slow_values[0]) * 10000
+
+            # Current position
+            is_above = fast_values[-1] > slow_values[-1]
+            ema_spread = (fast_values[-1] - slow_values[-1]) * 10000
+
+            print("\nEMA Analysis:")
+            print(f"Fast EMA: {fast_values[-1]:.5f}")
+            print(f"Slow EMA: {slow_values[-1]:.5f}")
+            print(f"Spread (pips): {ema_spread:.1f}")
+            print(f"Fast Movement (pips): {fast_diff:.1f}")
+            print(f"Slow Movement (pips): {slow_diff:.1f}")
+            print(f"Fast Trend (pips): {fast_trend:.1f}")
+            print(f"Slow Trend (pips): {slow_trend:.1f}")
+
+            # Signal detection for both directions
+            if (is_above and fast_diff > 0.2 and fast_trend > 0.5 and slow_trend > 0 and ema_spread > 1.0):
+                trend_strength = min((fast_trend / 5.0), 1.0)
+                print(f"Strong Bullish Signal")
+                return {
+                    'type': 'BULLISH',
+                    'strength': trend_strength,
+                    'momentum': 'Up',
+                    'spread': ema_spread
+                }
+            elif (not is_above and fast_diff < -0.2 and fast_trend < -0.5 and slow_trend < 0 and ema_spread < -1.0):
+                trend_strength = min((abs(fast_trend) / 5.0), 1.0)
+                print(f"Strong Bearish Signal")
+                return {
+                    'type': 'BEARISH',
+                    'strength': trend_strength,
+                    'momentum': 'Down',
+                    'spread': ema_spread
+                }
+
+            print("No significant trend detected")
+            return {
+                'type': 'NONE',
+                'strength': 0,
+                'momentum': 'Flat',
+                'spread': ema_spread
             }
 
         except Exception as e:
-            print(f"Volume analysis error: {e}")
-            # Return default values if anything fails
-            return {
-                'above_average': True,
-                'high_volume': False,
-                'volume_ratio': 1.0
-            }
-
-    def _detect_crossover(self, fast_ema: pd.Series, slow_ema: pd.Series) -> Dict:
-        """Detect EMA crossovers.
-
-        Args:
-            fast_ema: Fast EMA series
-            slow_ema: Slow EMA series
-
-        Returns:
-            Crossover signal information
-        """
-        current_diff = fast_ema.iloc[-1] - slow_ema.iloc[-1]
-        previous_diff = fast_ema.iloc[-2] - slow_ema.iloc[-2]
-
-        if current_diff > 0 and previous_diff < 0:
-            return {'type': 'BULLISH', 'strength': abs(current_diff)}
-        elif current_diff < 0 and previous_diff > 0:
-            return {'type': 'BEARISH', 'strength': abs(current_diff)}
-        else:
-            return {'type': 'NONE', 'strength': 0}
-
-    def _combine_signals(self, crossover: Dict, rsi: float, volume: Dict) -> Dict:
-        """Combine different signal components.
-
-        Args:
-            crossover: EMA crossover signal
-            rsi: Current RSI value
-            volume: Volume analysis results
-
-        Returns:
-            Combined trading signal
-        """
-        signal = {'type': 'NONE', 'strength': 0}
-
-        if crossover['type'] == 'BULLISH':
-            if rsi < self.rsi_ob and volume['above_average']:
-                signal = {'type': 'BUY', 'strength': crossover['strength']}
-        elif crossover['type'] == 'BEARISH':
-            if rsi > self.rsi_os and volume['above_average']:
-                signal = {'type': 'SELL', 'strength': crossover['strength']}
-
-        return signal
+            print(f"Error in signal detection: {str(e)}")
+            return {'type': 'NONE', 'strength': 0, 'momentum': 'Error'}
 
     def _calculate_signal_strength(self, crossover: Dict, rsi: float,
-                                 volume: Dict, fast_ema: float, slow_ema: float) -> float:
-        """Calculate overall signal strength.
-
-        Args:
-            crossover: Crossover signal
-            rsi: RSI value
-            volume: Volume analysis
-            fast_ema: Current fast EMA
-            slow_ema: Current slow EMA
-
-        Returns:
-            Signal strength value
-        """
-        # Base strength from crossover
+                                   volume: Dict, fast_ema: float, slow_ema: float) -> float:
         strength = crossover['strength']
 
-        # Adjust based on RSI
         if crossover['type'] == 'BULLISH':
             rsi_factor = (self.rsi_ob - rsi) / (self.rsi_ob - self.rsi_os)
         else:
             rsi_factor = (rsi - self.rsi_os) / (self.rsi_ob - self.rsi_os)
 
-        # Adjust based on volume
         volume_factor = volume['volume_ratio']
 
-        # Combine factors
         total_strength = (
             strength * self.config['signal_strength']['calculation']['weights']['ema']['base'] +
             rsi_factor * self.config['signal_strength']['calculation']['weights']['rsi']['base'] +
             volume_factor * self.config['signal_strength']['calculation']['weights']['volume']['base']
         )
 
-        return min(max(total_strength, 0), 1)  # Normalize between 0 and 1
+        return min(max(total_strength, 0), 1)
 
-    def calculate_position_size(self, account_info: Dict) -> float:
-        """Calculate position size based on risk parameters.
+    def calculate_position_size(self, account_info: Dict, data: pd.DataFrame) -> float:
+        """Calculate conservative position size with dynamic risk adjustment."""
+        try:
+            balance = account_info.get('balance', 10000)
 
-        Args:
-            account_info: Current account information
+            # Reduce risk for trending conditions
+            if self.current_market_condition.get('phase') == 'trending':
+                self.risk_percent = 0.005  # 0.5% risk in trends
+            else:
+                self.risk_percent = 0.0025  # 0.25% risk in ranging
 
-        Returns:
-            Position size in lots
-        """
-        # Implement position sizing based on:
-        # 1. Account balance
-        # 2. Risk per trade
-        # 3. Current market volatility
-        return 0.01  # Placeholder - implement actual calculation
+            risk_amount = balance * self.risk_percent
+
+            # Use ATR for pip distance calculation
+            atr_pips = (self._calculate_atr(data) / self.point_value)
+            pip_distance = max(atr_pips * 1.5, 25.0)  # At least 25 pips or 1.5 * ATR
+
+            lot_size = risk_amount / (self.default_pip_value_per_lot * pip_distance)
+            return max(min(lot_size, 0.5), 0.01)  # Cap at 0.5 lots, minimum 0.01
+
+        except Exception as e:
+            print(f"Error in position sizing: {e}")
+            return 0.01  # Default to minimum size on error
 
     def calculate_stop_loss(self, data: pd.DataFrame, signal: Dict) -> Optional[float]:
-        """Calculate stop loss price for a trade.
+        """Calculate dynamic stop loss based on ATR and market conditions."""
+        try:
+            atr = self._calculate_atr(data)
+            current_price = data['close'].iloc[-1]
 
-        Args:
-            data: Market data
-            signal: Signal information
+            # Use larger stops in trending markets
+            atr_multiplier = 2.0 if self.current_market_condition.get('phase') == 'trending' else 1.5
 
-        Returns:
-            Stop loss price
-        """
-        # Implement stop loss calculation based on:
-        # 1. ATR
-        # 2. Recent swing levels
-        # 3. Risk parameters
-        return None  # Placeholder - implement actual calculation
+            if signal['type'] == 'BUY':
+                return current_price - (atr * atr_multiplier)
+            else:
+                return current_price + (atr * atr_multiplier)
+
+        except Exception as e:
+            print(f"Error calculating stop loss: {e}")
+            return None
 
     def calculate_take_profit(self, data: pd.DataFrame, signal: Dict) -> Optional[float]:
-        """Calculate take profit price for a trade.
+        """Calculate dynamic take profit with market-based adjustments."""
+        try:
+            atr = self._calculate_atr(data)
+            current_price = data['close'].iloc[-1]
 
-        Args:
-            data: Market data
-            signal: Signal information
+            # Use larger targets in trending markets
+            atr_multiplier = 4.0 if self.current_market_condition.get('phase') == 'trending' else 3.0
 
-        Returns:
-            Take profit price
-        """
-        # Implement take profit calculation based on:
-        # 1. Risk:Reward ratio
-        # 2. Recent market structure
-        # 3. Volatility
-        return None  # Placeholder - implement actual calculation
+            if signal['type'] == 'BUY':
+                return current_price + (atr * atr_multiplier)
+            else:
+                return current_price - (atr * atr_multiplier)
+
+        except Exception as e:
+            print(f"Error calculating take profit: {e}")
+            return None
+
+    def _analyze_market_structure(self, data: pd.DataFrame) -> Dict:
+        # Identify key support/resistance levels
+        pivots = self._calculate_pivot_points(data)
+
+        # Analyze price action patterns
+        patterns = self._identify_patterns(data)
+
+        # Check if price is near significant levels
+        near_level = self._check_price_levels(data, pivots)
+
+        return {
+            'pivots': pivots,
+            'patterns': patterns,
+            'near_level': near_level
+        }
