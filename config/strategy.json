@@ -113,7 +113,7 @@
                 "indicator1": "fast_ma",
                 "indicator2": "slow_ma",
                 "confirmation_rules": {
-                    "minimum_cross_strength": 1.2,
+                    "minimum_cross_strength": 0.3,
                     "minimum_separation": "dynamic"
                 }
             },
@@ -139,7 +139,7 @@
                 "indicator1": "fast_ma",
                 "indicator2": "slow_ma",
                 "confirmation_rules": {
-                    "minimum_cross_strength": 1.0,
+                    "minimum_cross_strength": 0.3,
                     "minimum_separation": "dynamic"
                 }
             },

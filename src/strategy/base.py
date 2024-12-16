@@ -17,9 +17,11 @@ Created: December 2024
 
 from abc import ABC, abstractmethod
 import json
+import logging
 from typing import Dict, List, Optional, Union, Tuple
 from pathlib import Path
 import pandas as pd
+from datetime import datetime
 
 
 class Strategy(ABC):
@@ -354,45 +356,96 @@ class Strategy(ABC):
         pass
 
     def validate_signal(self, signal: Dict, market_data: Union[Dict, pd.Series]) -> bool:
-        """Validate a trading signal against current market conditions.
-
-        Args:
-            signal: Dictionary containing trading signal details
-            market_data: Market data, either as dictionary or pandas Series
-
-        Returns:
-            bool: True if signal is valid, False otherwise
-        """
+        """Validate a trading signal against current market conditions."""
         try:
             # Basic validation
-            if not signal or market_data is None:
+            if not signal or signal.get('type', '').upper() not in ['BUY', 'SELL']:
                 return False
 
             # Convert market_data to dictionary if it's a Series
             market_dict = market_data if isinstance(market_data, dict) else market_data.to_dict()
 
-            # Spread validation
+            # 1. Spread Validation with Dynamic Adjustment
             max_spread = self.config['filters']['spread']['max_spread_pips']
-            current_spread = float(market_dict.get('spread', float('inf')))  # Convert to float
+            current_spread = float(market_dict.get('spread', 0))
+
+            if self.config['filters']['spread']['dynamic_adjustment']['enabled']:
+                volatility_factor = self._calculate_volatility_adjustment()
+                max_spread *= (1 + volatility_factor)
 
             if current_spread > max_spread:
                 return False
 
-            # Market session validation
-            if not self._is_valid_session(market_dict):
-                return False
+            # 2. Signal Strength Validation with Market Context
+            signal_strength = float(signal.get('strength', 0))
+            min_strength = self.config['signal_conditions'][signal['type'].lower()]['primary']['confirmation_rules']['minimum_cross_strength']
 
-            # Signal strength validation
-            min_strength = 0.7  # Can be configured
-            signal_strength = float(signal.get('strength', 0))  # Convert to float
+            # Adjust minimum strength based on market conditions
+            if self.current_market_condition.get('phase') == 'trending':
+                min_strength *= 0.8  # More lenient in trending markets
+            elif self.current_market_condition.get('phase') == 'ranging':
+                min_strength *= 1.2  # Stricter in ranging markets
 
             if signal_strength < min_strength:
                 return False
 
+            # 3. Volume Validation with Session Context
+            if 'tick_volume' in market_dict:
+                volume_data = float(market_dict['tick_volume'])
+                volume_ma = float(market_dict.get('volume_ma', volume_data))
+
+                # Get current session
+                current_hour = pd.to_datetime(market_dict.get('time')).hour
+
+                # Define session volume thresholds
+                session_thresholds = {
+                    'Asian': 0.7,    # More lenient during Asian session
+                    'London': 0.8,   # Standard during London
+                    'NewYork': 0.8,  # Standard during New York
+                    'Off': 0.9       # Stricter during off-hours
+                }
+
+                # Determine current session
+                current_session = 'Off'
+                if 0 <= current_hour < 8:
+                    current_session = 'Asian'
+                elif 8 <= current_hour < 16:
+                    current_session = 'London'
+                elif 16 <= current_hour < 22:
+                    current_session = 'NewYork'
+
+                # Apply session-specific threshold
+                volume_threshold = session_thresholds[current_session]
+                if volume_data < volume_ma * volume_threshold:
+                    return False
+
+            # 4. Market Condition Validation
+            if self.current_market_condition:
+                # Validate trend alignment
+                if signal['type'] == 'BUY' and self.current_market_condition.get('trend_strength', 0) < -0.5:
+                    return False
+                if signal['type'] == 'SELL' and self.current_market_condition.get('trend_strength', 0) > 0.5:
+                    return False
+
+                # Validate volatility conditions
+                volatility = self.current_market_condition.get('volatility', 0)
+                if volatility > self.config['market_context']['volatility_measurement']['thresholds']['high']:
+                    if signal_strength < min_strength * 1.2:  # Require stronger signals in high volatility
+                        return False
+
+            # 5. RSI Validation if available
+            if 'rsi' in market_dict:
+                rsi = float(market_dict['rsi'])
+                if signal['type'] == 'BUY' and rsi > self.config['indicators']['rsi']['dynamic_levels']['extreme_levels']['base_overbought']:
+                    return False
+                if signal['type'] == 'SELL' and rsi < self.config['indicators']['rsi']['dynamic_levels']['extreme_levels']['base_oversold']:
+                    return False
+
             return True
 
         except Exception as e:
-            print(f"Signal validation error: {e}")
+            logger = logging.getLogger(__name__)
+            logger.error(f"Signal validation error: {str(e)}")
             return False
 
 
@@ -410,13 +463,57 @@ class Strategy(ABC):
         return True
 
     def update_trade_history(self, trade: Dict) -> None:
-        """Update strategy's trade history.
+        """Update strategy's trade history and analyze performance.
 
         Args:
-            trade: Completed trade information
+            trade: Dictionary containing completed trade information including:
+                - entry_time: Trade entry timestamp
+                - exit_time: Trade exit timestamp
+                - type: Trade type (BUY/SELL)
+                - profit: Trade profit/loss
         """
-        self.trades_history.append(trade)
-        self._update_performance_metrics()
+        # Call parent method to update basic trade history
+        super().update_trade_history(trade)
+
+        try:
+            # Only analyze after accumulating enough trades
+            if len(self.trades_history) >= self.config.get('min_trades_for_analysis', 10):
+                print("\nAnalyzing trading windows performance...")
+
+                # Convert trades history to DataFrame
+                trades_df = pd.DataFrame(self.trades_history)
+
+                # Ensure required columns exist
+                if not all(col in trades_df.columns for col in ['entry_time', 'exit_time', 'type', 'profit']):
+                    print("Warning: Missing required columns in trade history")
+                    return
+
+                # Convert timestamps if they're strings
+                for col in ['entry_time', 'exit_time']:
+                    if trades_df[col].dtype == 'object':
+                        trades_df[col] = pd.to_datetime(trades_df[col])
+
+                # Run window analysis
+                window_analysis = self.performance_optimizer.analyze_time_windows(trades_df)
+
+                if window_analysis:
+                    # Create results directory if it doesn't exist
+                    results_dir = Path("results")
+                    results_dir.mkdir(exist_ok=True)
+
+                    # Save analysis results
+                    results_path = results_dir / f"performance_analysis_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                    self.performance_optimizer.save_analysis(window_analysis, str(results_path))
+                    print(f"Performance analysis saved to: {results_path}")
+
+                    # Generate and print report
+                    report = self.performance_optimizer.generate_session_report(window_analysis)
+                    print("\n" + report)
+
+        except Exception as e:
+            print(f"Error in performance analysis: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
 
     def _update_performance_metrics(self) -> None:
         """Update strategy performance metrics."""

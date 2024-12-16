@@ -643,17 +643,28 @@ def audit_backtest() -> None:
                 logger.info(f"  Available bars: {len(test_data)}")
                 logger.info(f"  Sufficient data: {len(test_data) >= min_required_bars}")
 
-                basic_validation = strategy._validate_basic_data(test_data)
+                basic_validation = strategy.data_validator.validate_basic_data(test_data)
                 logger.info(f"\nBasic Validation Results:")
                 logger.info(f"Overall Pass: {basic_validation['overall_pass']}")
+
+                # Log validation checks
+                if 'checks' in basic_validation:
+                    logger.info("\nValidation Checks:")
+                    for check_name, check_result in basic_validation['checks'].items():
+                        logger.info(f"  {check_name}: {'[PASS]' if check_result else '[FAIL]'}")
+
+                # Log any error messages
                 if not basic_validation['overall_pass']:
-                    logger.error("Validation Errors:")
-                    for msg in basic_validation['error_messages']:
+                    logger.error("\nValidation Errors:")
+                    for msg in basic_validation.get('error_messages', []):
                         logger.error(f"  {msg}")
+
             except Exception as e:
-                logger.error(f"Basic validation failed: {str(e)}")
+                logger.error(f"Data validation failed: {str(e)}")
                 logger.error(f"Data shape: {test_data.shape}")
                 logger.error(f"Data columns: {test_data.columns}")
+                import traceback
+                logger.error(traceback.format_exc())
 
             # Enhanced Signal Validation Parameters
             logger.info("\nDetailed Signal Validation Parameters:")
@@ -750,6 +761,75 @@ def audit_backtest() -> None:
                 logger.error(f"Signal analysis failed: {str(e)}")
                 logger.error(f"Data shape: {test_window.shape}")
                 logger.error(f"Data columns: {test_window.columns}")
+
+            # Analyze Simulation Process
+            logger.info("\nAnalyzing Simulation Process:")
+            try:
+                # First, analyze backtester configuration
+                logger.info("\nBacktester Configuration:")
+                logger.info(f"Initial Balance: ${backtester.initial_balance:,.2f}")
+                logger.info(f"Commission: ${backtester.commission:.2f}")
+                logger.info(f"Spread: {backtester.spread:.5f}")
+
+                # Analyze signal generation and validation process
+                signal = strategy.generate_signals(test_window)
+                if signal and signal['type'] != 'NONE':
+                    logger.info("\nSignal Details:")
+                    logger.info(f"Type: {signal['type']}")
+                    logger.info(f"Strength: {signal['strength']:.2f}")
+                    logger.info(f"Entry Price: {signal.get('entry_price', 'Not Set')}")
+
+                    # Test position sizing
+                    position_size = strategy.calculate_position_size(
+                        {'balance': backtester.initial_balance},
+                        test_window
+                    )
+                    sl = strategy.calculate_stop_loss(test_window, signal)
+                    tp = strategy.calculate_take_profit(test_window, signal)
+
+                    logger.info("\nTrade Parameters:")
+                    logger.info(f"Position Size: {position_size:.2f} lots")
+                    logger.info(f"Stop Loss: {sl:.5f if sl else 'Not Set'}")
+                    logger.info(f"Take Profit: {tp:.5f if tp else 'Not Set'}")
+
+                    # Calculate potential risk/reward
+                    if sl and tp:
+                        risk = abs(signal['entry_price'] - sl) * position_size
+                        reward = abs(tp - signal['entry_price']) * position_size
+                        logger.info(f"Risk Amount: ${risk:.2f}")
+                        logger.info(f"Reward Amount: ${reward:.2f}")
+                        logger.info(f"Risk-Reward Ratio: {reward/risk:.2f}")
+
+                # Run simulation with detailed logging
+                logger.info("\nRunning Simulation:")
+                results = backtester._run_simulation(test_window)
+
+                logger.info("\nSimulation Results Analysis:")
+                logger.info(f"Total Trades: {results.get('total_trades', 0)}")
+                logger.info(f"Winning Trades: {results.get('winning_trades', 0)}")
+                logger.info(f"Losing Trades: {results.get('losing_trades', 0)}")
+                logger.info(f"Gross Profit: ${results.get('gross_profit', 0):.2f}")
+                logger.info(f"Gross Loss: ${results.get('gross_loss', 0):.2f}")
+                logger.info(f"Net Profit: ${results.get('total_profit', 0):.2f}")
+
+                # Analyze why trades might not be executing
+                if results.get('total_trades', 0) == 0:
+                    logger.info("\nAnalyzing Why No Trades Were Executed:")
+                    logger.info("1. Signal Generation:")
+                    logger.info(f"   - Valid Signal Generated: {signal['type'] != 'NONE' if signal else False}")
+                    logger.info(f"   - Signal Strength: {signal.get('strength', 0) if signal else 'No Signal'}")
+
+                    logger.info("\n2. Position Parameters:")
+                    logger.info(f"   - Position Size: {position_size if 'position_size' in locals() else 'Not Calculated'}")
+                    logger.info(f"   - Stop Loss Available: {sl is not None if 'sl' in locals() else 'Not Calculated'}")
+                    logger.info(f"   - Take Profit Available: {tp is not None if 'tp' in locals() else 'Not Calculated'}")
+
+            except Exception as e:
+                logger.error(f"Simulation analysis failed: {str(e)}")
+                logger.error(f"Data shape: {test_window.shape}")
+                logger.error(f"Data columns: {test_window.columns}")
+                import traceback
+                logger.error(traceback.format_exc())
 
             # Enhanced Simulation Analysis
             logger.info("\nRunning enhanced simulation analysis...")
@@ -998,7 +1078,7 @@ def audit_run_backtest() -> None:
        raise
 
 def audit_calculations() -> None:
-    """Audit strategy calculations."""
+    """Audit strategy calculations and isolate which module is failing."""
     print("\n=== Starting Calculation Audit ===")
     print("Setting up logging...")
 
@@ -1009,6 +1089,7 @@ def audit_calculations() -> None:
         # Setup test environment
         from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
         from src.core.mt5 import MT5Handler
+        import MetaTrader5 as mt5
 
         strategy_config = str(Path("config/strategy.json"))
         strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
@@ -1021,65 +1102,168 @@ def audit_calculations() -> None:
         symbol = "EURUSD"
         timeframe = "M5"
         end_date = datetime.now()
-        start_date = end_date - timedelta(hours=24)  # 24 hours of data
+        start_date = end_date - timedelta(days=7)  # Changed from hours to days
 
-        data = mt5_handler.get_historical_data(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_date=start_date,
-            end_date=end_date
-        )
+        logger.info(f"\nFetching historical data:")
+        logger.info(f"Symbol: {symbol}")
+        logger.info(f"Period: {start_date} to {end_date}")
+        logger.info(f"Timeframe: {timeframe}")
 
-        if data is not None:
+        # Add error checking for MT5 connection
+        if not mt5_handler.connected:
+            logger.error("MT5 not connected")
+            return
+
+        # Get data with enhanced error handling
+        try:
+            data = mt5_handler.get_historical_data(
+                symbol=symbol,
+                timeframe=timeframe,
+                start_date=start_date,
+                end_date=end_date
+            )
+
+            if data is None:
+                logger.error("MT5 returned None for historical data")
+                mt5_error = mt5.last_error()
+                logger.error(f"MT5 Error: {mt5_error}")
+                return
+
+            if len(data) == 0:
+                logger.error("MT5 returned empty dataset")
+                return
+
+            logger.info(f"Successfully retrieved {len(data)} bars")
+            logger.info(f"Data range: {data['time'].min()} to {data['time'].max()}")
+
+        except Exception as e:
+            logger.error(f"Error retrieving historical data: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return
+
+        if data is not None and len(data) > 0:
             data['symbol'] = symbol
             logger.info(f"Retrieved {len(data)} data points")
 
-            # Test ATR calculation
-            logger.info("\nTesting ATR calculation:")
+            # Verify we have enough data
+            min_required = max(
+                strategy.slow_ema_period * 2,
+                strategy.rsi_period * 2,
+                strategy.volume_period * 2,
+                20  # Minimum baseline
+            )
+
+            logger.info(f"\nData Requirements:")
+            logger.info(f"Minimum required bars: {min_required}")
+            logger.info(f"Available bars: {len(data)}")
+
+            if len(data) < min_required:
+                logger.error(f"Insufficient data points. Need at least {min_required}, have {len(data)}")
+                return
+
+            # First, let's analyze the signal generation components
+            logger.info("\n=== SIGNAL GENERATION COMPONENT ANALYSIS ===")
+
+            # Analyze EMA calculations
             try:
+                logger.info("\nAnalyzing EMA calculations...")
+                fast_ema = data['close'].ewm(span=strategy.fast_ema_period, adjust=False).mean()
+                slow_ema = data['close'].ewm(span=strategy.slow_ema_period, adjust=False).mean()
+
+                logger.info(f"Fast EMA current: {fast_ema.iloc[-1]:.5f}")
+                logger.info(f"Slow EMA current: {slow_ema.iloc[-1]:.5f}")
+                logger.info(f"EMA Spread (pips): {(fast_ema.iloc[-1] - slow_ema.iloc[-1])*10000:.1f}")
+            except Exception as e:
+                logger.error(f"EMA Calculation failed: {str(e)}")
+
+            # Analyze RSI with validation
+            try:
+                logger.info("\nAnalyzing RSI calculation...")
+                rsi = strategy._calculate_rsi(data['close'])
+                logger.info(f"Current RSI: {rsi.iloc[-1]:.2f}")
+                logger.info(f"Previous RSI: {rsi.iloc[-2]:.2f}")
+            except Exception as e:
+                logger.error(f"RSI Calculation failed: {str(e)}")
+
+            # Analyze Volume with validation
+            try:
+                logger.info("\nAnalyzing Volume calculation...")
+                if 'tick_volume' in data.columns:
+                    volume_data = data['tick_volume'].tail(strategy.volume_period * 2)
+                    logger.info(f"Recent Volume Data: {volume_data.tail()}")
+                    vol_sma = data['tick_volume'].rolling(window=strategy.volume_period).mean()
+                    logger.info(f"Volume SMA: {vol_sma.iloc[-1]:.2f}")
+                    logger.info(f"Current Volume: {data['tick_volume'].iloc[-1]}")
+                    logger.info(f"Volume Ratio: {data['tick_volume'].iloc[-1] / vol_sma.iloc[-1]:.2f}")
+                else:
+                    logger.error("Tick volume data missing in dataset.")
+            except Exception as e:
+                logger.error(f"Volume Calculation failed: {str(e)}")
+
+            # ATR Analysis with validation
+            try:
+                logger.info("\nAnalyzing ATR calculation...")
                 atr = strategy._calculate_atr(data)
-                logger.info(f"ATR value: {atr}")
-                logger.info("ATR calculation components:")
-                logger.info(f"High-Low range: {(data['high'] - data['low']).mean()}")
-                logger.info(f"High-PrevClose range: {abs(data['high'] - data['close'].shift()).mean()}")
-                logger.info(f"Low-PrevClose range: {abs(data['low'] - data['close'].shift()).mean()}")
+                logger.info(f"ATR value: {atr:.5f}")
+                logger.info(f"ATR in pips: {(atr * 10000):.1f}")
             except Exception as e:
-                logger.error(f"ATR calculation failed: {str(e)}")
+                logger.error(f"ATR Calculation failed: {str(e)}")
 
-            # Test volume analysis
-            logger.info("\nTesting volume analysis:")
+            # Add market condition analysis before signal generation
             try:
-                volume_data = strategy._analyze_volume_conditions(data)
-                logger.info(f"Volume analysis: {volume_data}")
-                logger.info("Volume components:")
-                logger.info(f"Current volume: {data['tick_volume'].iloc[-1]}")
-                logger.info(f"Volume SMA: {data['tick_volume'].rolling(window=strategy.volume_period).mean().iloc[-1]}")
+                logger.info("\nAnalyzing Market Condition...")
+                market_condition = strategy._analyze_market_condition(data)
+                logger.info(f"Market Phase: {market_condition.get('phase', 'unknown')}")
+                logger.info(f"Volatility: {market_condition.get('volatility', 0)}")
+                logger.info(f"Trend Strength: {market_condition.get('trend_strength', 0)}")
             except Exception as e:
-                logger.error(f"Volume analysis failed: {str(e)}")
+                logger.error(f"Market Condition Analysis failed: {str(e)}")
 
-            # Test signal strength calculation
-            logger.info("\nTesting signal strength calculation:")
+            # Detailed Signal Conditions
             try:
-                test_crossover = {'type': 'BULLISH', 'strength': 0.8}
-                test_rsi = 45.0
-                test_volume = {'above_average': True, 'high_volume': False, 'volume_ratio': 1.2}
-                strength = strategy._calculate_signal_strength(
-                    test_crossover,
-                    test_rsi,
-                    test_volume,
-                    data['close'].iloc[-1],
-                    data['close'].iloc[-2]
-                )
-                logger.info(f"Signal strength: {strength}")
+                logger.info("\nAnalyzing Signal Conditions...")
+
+                # EMA Condition
+                ema_condition = fast_ema.iloc[-1] > slow_ema.iloc[-1]  # Buy signal condition
+                logger.info(f"EMA Condition (Fast > Slow): {ema_condition}")
+
+                # RSI Condition
+                rsi_condition = 35 < rsi.iloc[-1] < 70  # Buy signal condition (RSI in valid range)
+                logger.info(f"RSI Condition (35 < RSI < 70): {rsi_condition}")
+
+                # Volume Condition
+                volume_condition = data['tick_volume'].iloc[-1] > vol_sma.iloc[-1]  # Volume above average
+                logger.info(f"Volume Condition (Current Volume > SMA): {volume_condition}")
+
+                # Market Condition (trend strength)
+                market_condition_valid = market_condition.get('trend_strength', 0) > 0.5  # Trend strength above threshold
+                logger.info(f"Market Condition (Trend Strength > 0.5): {market_condition_valid}")
+
+                # Final Signal Condition
+                signal_valid = ema_condition and rsi_condition and volume_condition and market_condition_valid
+                logger.info(f"Final Signal Valid: {signal_valid}")
+
             except Exception as e:
-                logger.error(f"Signal strength calculation failed: {str(e)}")
+                logger.error(f"Signal Conditions Analysis failed: {str(e)}")
+
+            # Generate the signal
+            try:
+                logger.info("\nGenerating Signal...")
+                signal = strategy.generate_signals(data)
+                logger.info(f"Generated Signal: {signal}")
+            except Exception as e:
+                logger.error(f"Signal Generation failed: {str(e)}")
 
         logger.info("Calculation audit completed")
         print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
 
     except Exception as e:
         logger.error(f"Calculation audit failed: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
+
 
 def audit_dashboard() -> None:
     """Audit dashboard functionality without displaying on screen."""

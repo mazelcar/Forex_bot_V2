@@ -4,12 +4,14 @@ This script demonstrates how to:
 1. Initialize the strategy
 2. Set up the backtester
 3. Run a backtest
-4. Analyze results
+4. Analyze results and performance
 """
 
 from datetime import datetime, timedelta
 from pathlib import Path
+import pandas as pd
 from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+from src.strategy.optimization.performance_optimizer import PerformanceOptimizer
 from src.strategy.backtesting import Backtester
 
 def main():
@@ -21,6 +23,10 @@ def main():
     strategy_config = str(Path("config/strategy.json"))
     strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
     print("\nStrategy initialized successfully")
+
+    # Initialize performance optimizer
+    optimizer = PerformanceOptimizer()
+    print("Performance optimizer initialized")
 
     # Create backtester
     backtester = Backtester(
@@ -50,6 +56,7 @@ def main():
     # Start from most recent data chunk
     current_end = end_date
     all_results = []
+    all_trades = []
     chunk_count = 0
 
     while test_duration.days > 0:
@@ -80,6 +87,10 @@ def main():
                 print(f"\nChunk {chunk_count} processed successfully")
                 print(f"Trades in chunk: {results.get('total_trades', 0)}")
                 all_results.append(results)
+
+                # Collect trades data for analysis
+                if 'trades' in results:
+                    all_trades.extend(results['trades'])
             else:
                 print(f"\nChunk {chunk_count} processing failed")
 
@@ -103,12 +114,35 @@ def main():
             else:
                 print(f"{key}: {value}")
 
-        # Save results
-        results_dir = Path("results")
-        results_dir.mkdir(exist_ok=True)
-        results_path = results_dir / f"backtest_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        backtester.save_results(str(results_path))
-        print(f"\nResults saved to: {results_path}")
+        # Analyze trading performance
+        if all_trades:
+            print("\nAnalyzing trading windows performance...")
+            trades_df = pd.DataFrame(all_trades)
+            window_analysis = optimizer.analyze_time_windows(trades_df)
+
+            if window_analysis:
+                # Create results directory
+                results_dir = Path("results")
+                results_dir.mkdir(exist_ok=True)
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+                # Save backtest results
+                results_path = results_dir / f"backtest_results_{timestamp}.json"
+                backtester.save_results(str(results_path))
+                print(f"\nBacktest results saved to: {results_path}")
+
+                # Save window analysis
+                analysis_path = results_dir / f"window_analysis_{timestamp}.json"
+                optimizer.save_analysis(window_analysis, str(analysis_path))
+                print(f"Window analysis saved to: {analysis_path}")
+
+                # Print performance report
+                print("\nTrading Windows Performance Report:")
+                print("=" * 50)
+                report = optimizer.generate_session_report(window_analysis)
+                print("\n" + report)
+        else:
+            print("\nNo trades available for window analysis")
     else:
         print("\nNo valid results generated")
 

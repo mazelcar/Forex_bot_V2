@@ -11,9 +11,15 @@ from typing import Dict, List, Optional
 import pandas as pd
 import numpy as np
 
+
 from src.strategy.validation.indicator_validator import IndicatorValidator
 from .base import Strategy
 from .validation.data_validator import DataValidator
+from src.strategy.optimization.performance_optimizer import PerformanceOptimizer
+
+import logging
+logger = logging.getLogger('audit')
+
 
 class MA_RSI_Volume_Strategy(Strategy):
     def __init__(self, config_file: str):
@@ -37,6 +43,9 @@ class MA_RSI_Volume_Strategy(Strategy):
         # Initialize DataValidator
         self.data_validator = DataValidator(self.config)
         self.indicator_validator = IndicatorValidator(self.config)
+
+        # Add performance optimizer
+        self.performance_optimizer = PerformanceOptimizer(config_file)
 
     def _calculate_volatility(self, data: pd.DataFrame) -> float:
         return self._calculate_atr(data, period=14)
@@ -118,7 +127,7 @@ class MA_RSI_Volume_Strategy(Strategy):
             min_periods = max(self.fast_ema_period, self.slow_ema_period, self.rsi_period, 20)
 
             if len(data) < min_periods:
-                print(f"Insufficient data: {len(data)} < {min_periods}")
+                logger.info(f"Insufficient data: {len(data)} < {min_periods}")
                 return {'type': 'NONE', 'strength': 0}
 
             # Calculate indicators
@@ -134,68 +143,91 @@ class MA_RSI_Volume_Strategy(Strategy):
             current_rsi = rsi.iloc[-1]
             current_close = data['close'].iloc[-1]
 
-            print("\nDetailed Market Analysis:")
-            print(f"Current Price: {current_close:.5f}")
-            print(f"RSI: {current_rsi:.2f}")
-            print(f"Trend: {trend['direction']} ({trend['strength']})")
-            print(f"Volume Ratio: {volume['volume_ratio']:.2f}")
-            print(f"Signal Type: {crossover['type']}")
+            logger.info("\nDetailed Market Analysis:")
+            logger.info(f"Current Price: {current_close:.5f}")
+            logger.info(f"RSI: {current_rsi:.2f}")
+            logger.info(f"Trend: {trend['direction']} ({trend['strength']})")
+            logger.info(f"Volume Ratio: {volume['volume_ratio']:.2f}")
+            logger.info(f"Signal Type: {crossover['type']}")
 
             signal = {'type': 'NONE', 'strength': 0}
 
             if crossover['type'] == 'BULLISH':
-                print("\nChecking Buy Conditions:")
-                print(f"RSI < 65: {current_rsi < 65} ({current_rsi:.2f})")
-                print(f"RSI > 40: {current_rsi > 40} ({current_rsi:.2f})")
-                print(f"Volume > 0.8: {volume['volume_ratio'] > 0.8} ({volume['volume_ratio']:.2f})")
-                print(f"Valid Trend: {trend['direction'] == 'UP'} ({trend['direction']})")
-                print(f"Trend Strength: {trend['strength']}")
+                logger.info("\nChecking Buy Conditions:")
+                logger.info(f"RSI < 80: {current_rsi < 80} ({current_rsi:.2f})")
+                logger.info(f"RSI > 20: {current_rsi > 20} ({current_rsi:.2f})")
+                logger.info(f"Volume > 0.5: {volume['volume_ratio'] > 0.5} ({volume['volume_ratio']:.2f})")
+                logger.info(f"Valid Trend (UP): {trend['direction'] == 'UP'} ({trend['direction']})")
+                logger.info(f"Trend Strength: {trend['strength']}")
 
-                if (current_rsi < 65 and
-                    current_rsi > 40 and
-                    volume['volume_ratio'] > 0.8 and
-                    trend['direction'] == 'UP'):
+                if (current_rsi < 80 and
+                    current_rsi > 20 and
+                    volume['volume_ratio'] > 0.5 and
+                    trend['direction'] in ['UP', 'MIXED']):
+
+                    # Debug logs before assigning signal
+                    logger.info("\n[DEBUG] Bullish conditions met:")
+                    logger.info(f"  RSI condition: {20 < current_rsi < 80}")
+                    logger.info(f"  Volume condition: {volume['volume_ratio'] > 0.5}")
+                    logger.info(f"  Trend condition: {trend['direction']} in ['UP', 'MIXED']")
 
                     signal = {
                         'type': 'BUY',
                         'strength': crossover['strength'],
                         'entry_price': current_close
                     }
-                    print("\nBUY Signal Generated!")
-                    print(f"Entry Price: {current_close:.5f}")
-                    print(f"Signal Strength: {signal['strength']:.2f}")
+                    logger.info("\nBUY Signal Generated!")
+                    logger.info(f"Entry Price: {current_close:.5f}")
+                    logger.info(f"Signal Strength: {signal['strength']:.2f}")
 
             elif crossover['type'] == 'BEARISH':
-                print("\nChecking Sell Conditions:")
-                print(f"RSI > 30: {current_rsi > 30} ({current_rsi:.2f})")
-                print(f"RSI < 60: {current_rsi < 60} ({current_rsi:.2f})")
-                print(f"Volume > 0.8: {volume['volume_ratio'] > 0.8} ({volume['volume_ratio']:.2f})")
-                print(f"Valid Trend: {trend['direction'] == 'DOWN'} ({trend['direction']})")
-                print(f"Trend Strength: {trend['strength']}")
+                logger.info("\nChecking Sell Conditions:")
+                logger.info(f"RSI > 20: {current_rsi > 20} ({current_rsi:.2f})")
+                logger.info(f"RSI < 80: {current_rsi < 80} ({current_rsi:.2f})")
+                logger.info(f"Volume > 0.5: {volume['volume_ratio'] > 0.5} ({volume['volume_ratio']:.2f})")
+                logger.info(f"Valid Trend (DOWN): {trend['direction'] in ['DOWN', 'MIXED']} ({trend['direction']})")
+                logger.info(f"Trend Strength: {trend['strength']}")
 
-                if (current_rsi > 30 and
-                    current_rsi < 60 and
-                    volume['volume_ratio'] > 0.8 and
-                    trend['direction'] == 'DOWN' and
-                    trend['strength'] == 'STRONG' and
-                    abs(crossover['spread']) > 1.0):
+                if (current_rsi > 20 and
+                    current_rsi < 80 and
+                    volume['volume_ratio'] > 0.5 and
+                    trend['direction'] in ['DOWN', 'MIXED'] and
+                    abs(crossover['spread']) > 0.5):
+
+                    # Debug logs before assigning signal
+                    logger.info("\n[DEBUG] Bearish conditions met:")
+                    logger.info(f"  RSI condition: {20 < current_rsi < 80}")
+                    logger.info(f"  Volume condition: {volume['volume_ratio'] > 0.5}")
+                    logger.info(f"  Trend condition: {trend['direction']} in ['DOWN', 'MIXED']")
 
                     signal = {
                         'type': 'SELL',
                         'strength': crossover['strength'],
                         'entry_price': current_close
                     }
-                    print("\nSELL Signal Generated!")
-                    print(f"Entry Price: {current_close:.5f}")
-                    print(f"Signal Strength: {signal['strength']:.2f}")
+                    logger.info("\nSELL Signal Generated!")
+                    logger.info(f"Entry Price: {current_close:.5f}")
+                    logger.info(f"Signal Strength: {signal['strength']:.2f}")
+
+            # Additional detailed logging before returning the final signal
+            logger.info("\n=== Detailed Signal Decision Logging ===")
+            logger.info(f"Detected crossover type: {crossover['type']}")
+            logger.info(f"Signal candidate: {signal['type']} with strength {signal['strength']:.2f}")
+            logger.info(f"  EMA Conditions: Fast EMA={fast_ema.iloc[-1]:.5f}, Slow EMA={slow_ema.iloc[-1]:.5f}")
+            logger.info(f"  RSI={current_rsi:.2f}, RSI OB={self.rsi_ob}, RSI OS={self.rsi_os}")
+            logger.info(f"  Volume Ratio={volume['volume_ratio']:.2f}, Above Avg={volume['above_average']}, High Volume={volume['high_volume']}")
+            logger.info(f"  Trend Direction={trend['direction']}, Trend Strength={trend['strength']}")
+            logger.info(f"  Final decision: Returning {signal}")
 
             return signal
 
         except Exception as e:
-            print(f"Error in signal generation: {str(e)}")
+            logger.error(f"Error in signal generation: {str(e)}")
             import traceback
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
             return {'type': 'NONE', 'strength': 0}
+
+
 
 
     def _calculate_rsi(self, prices: pd.Series) -> pd.Series:
@@ -360,28 +392,38 @@ class MA_RSI_Volume_Strategy(Strategy):
             is_above = fast_values[-1] > slow_values[-1]
             ema_spread = (fast_values[-1] - slow_values[-1]) * 10000
 
-            print("\nEMA Analysis:")
-            print(f"Fast EMA: {fast_values[-1]:.5f}")
-            print(f"Slow EMA: {slow_values[-1]:.5f}")
-            print(f"Spread (pips): {ema_spread:.1f}")
-            print(f"Fast Movement (pips): {fast_diff:.1f}")
-            print(f"Slow Movement (pips): {slow_diff:.1f}")
-            print(f"Fast Trend (pips): {fast_trend:.1f}")
-            print(f"Slow Trend (pips): {slow_trend:.1f}")
+            # Enhanced logging
+            logger.info("\nEMA Analysis:")
+            logger.info(f"Fast EMA: {fast_values[-1]:.5f}")
+            logger.info(f"Slow EMA: {slow_values[-1]:.5f}")
+            logger.info(f"Spread (pips): {ema_spread:.1f}")
+            logger.info(f"Fast Movement (pips): {fast_diff:.1f}")
+            logger.info(f"Slow Movement (pips): {slow_diff:.1f}")
+            logger.info(f"Fast Trend (pips): {fast_trend:.1f}")
+            logger.info(f"Slow Trend (pips): {slow_trend:.1f}")
 
-            # Signal detection for both directions
-            if (is_above and fast_diff > 0.2 and fast_trend > 0.5 and slow_trend > 0 and ema_spread > 1.0):
-                trend_strength = min((fast_trend / 5.0), 1.0)
-                print(f"Strong Bullish Signal")
+            # More lenient signal detection
+            if (is_above and
+                fast_diff > 0.1 and  # Reduced from 0.2
+                fast_trend > 0.3 and  # Reduced from 0.5
+                ema_spread > 0.5):    # Reduced from 1.0
+
+                trend_strength = min((fast_trend / 3.0), 1.0)  # Adjusted divisor
+                logger.info(f"Bullish Signal Detected - Strength: {trend_strength:.2f}")
                 return {
                     'type': 'BULLISH',
                     'strength': trend_strength,
                     'momentum': 'Up',
                     'spread': ema_spread
                 }
-            elif (not is_above and fast_diff < -0.2 and fast_trend < -0.5 and slow_trend < 0 and ema_spread < -1.0):
-                trend_strength = min((abs(fast_trend) / 5.0), 1.0)
-                print(f"Strong Bearish Signal")
+
+            elif (not is_above and
+                fast_diff < -0.1 and  # Reduced from -0.2
+                fast_trend < -0.3 and  # Reduced from -0.5
+                ema_spread < -0.5):    # Reduced from -1.0
+
+                trend_strength = min((abs(fast_trend) / 3.0), 1.0)  # Adjusted divisor
+                logger.info(f"Bearish Signal Detected - Strength: {trend_strength:.2f}")
                 return {
                     'type': 'BEARISH',
                     'strength': trend_strength,
@@ -389,7 +431,7 @@ class MA_RSI_Volume_Strategy(Strategy):
                     'spread': ema_spread
                 }
 
-            print("No significant trend detected")
+            logger.info("No significant trend detected")
             return {
                 'type': 'NONE',
                 'strength': 0,
@@ -398,7 +440,9 @@ class MA_RSI_Volume_Strategy(Strategy):
             }
 
         except Exception as e:
-            print(f"Error in signal detection: {str(e)}")
+            logger.error(f"Error in signal detection: {str(e)}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {'type': 'NONE', 'strength': 0, 'momentum': 'Error'}
 
     def _calculate_signal_strength(self, crossover: Dict, rsi: float,
