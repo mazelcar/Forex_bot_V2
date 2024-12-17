@@ -58,7 +58,7 @@ class DataValidator:
             self.slow_ema_period * 2,  # For EMA calculation
             self.rsi_period * 2,       # For RSI calculation
             self.volume_period * 2,    # For volume analysis
-            50                         # Minimum for trend analysis
+            20                         # Minimum for trend analysis
         )
 
         has_enough_data = len(data) >= min_required_bars

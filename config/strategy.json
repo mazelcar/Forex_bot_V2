@@ -17,22 +17,22 @@
                 "dynamic_adjustment": {
                     "enabled": true,
                     "volatility_based": {
-                        "high_volatility": 5,
-                        "normal_volatility": 8,
-                        "low_volatility": 13
+                        "high_volatility": 3,
+                        "normal_volatility": 5,
+                        "low_volatility": 8
                     }
                 }
             },
             "slow_ma": {
                 "type": "EMA",
-                "period": 13,
+                "period": 8,
                 "source": "close",
                 "dynamic_adjustment": {
                     "enabled": true,
                     "volatility_based": {
-                        "high_volatility": 13,
-                        "normal_volatility": 21,
-                        "low_volatility": 34
+                        "high_volatility": 8,
+                        "normal_volatility": 13,
+                        "low_volatility": 21
                     }
                 }
             }
@@ -44,18 +44,18 @@
                 "center_line": {
                     "base": 50,
                     "dynamic_adjustment": true,
-                    "adjustment_range": 3,
+                    "adjustment_range": 5,
                     "market_condition_modifiers": {
-                        "trend_strength": [-3, 3],
-                        "volatility": [-2, 2],
-                        "volume_impact": [-2, 2]
+                        "trend_strength": [-5, 5],
+                        "volatility": [-3, 3],
+                        "volume_impact": [-3, 3]
                     }
                 },
                 "extreme_levels": {
-                    "base_overbought": 65,
-                    "base_oversold": 35,
+                    "base_overbought": 70,
+                    "base_oversold": 30,
                     "dynamic_adjustment": true,
-                    "adjustment_range": 5
+                    "adjustment_range": 8
                 }
             }
         },
@@ -63,16 +63,16 @@
             "period": 10,
             "volume_ma": {
                 "type": "SMA",
-                "period": 20
+                "period": 15
             },
             "dynamic_thresholds": {
                 "enabled": true,
                 "calculation": "standard_deviation",
-                "lookback_periods": 100,
+                "lookback_periods": 50,
                 "threshold_multipliers": {
-                    "high": 3,
-                    "medium": 2.0,
-                    "low": 1.2
+                    "high": 2.0,
+                    "medium": 1.5,
+                    "low": 0.8
                 }
             }
         }
@@ -113,7 +113,7 @@
                 "indicator1": "fast_ma",
                 "indicator2": "slow_ma",
                 "confirmation_rules": {
-                    "minimum_cross_strength": 0.3,
+                    "minimum_cross_strength": 0.1,
                     "minimum_separation": "dynamic"
                 }
             },
@@ -139,7 +139,7 @@
                 "indicator1": "fast_ma",
                 "indicator2": "slow_ma",
                 "confirmation_rules": {
-                    "minimum_cross_strength": 0.3,
+                    "minimum_cross_strength": 0.1,
                     "minimum_separation": "dynamic"
                 }
             },
@@ -163,11 +163,11 @@
 
     "filters": {
         "spread": {
-            "max_spread_pips": 2,
+            "max_spread_pips": 3,
             "dynamic_adjustment": {
                 "enabled": true,
                 "volatility_based": true,
-                "max_adjustment": 2
+                "max_adjustment": 3
             }
         },
         "market_volatility": {
@@ -176,7 +176,7 @@
                 "dynamic_thresholds": {
                     "enabled": true,
                     "calculation_method": "percentile_range",
-                    "lookback_periods": 100
+                    "lookback_periods": 50
                 }
             }
         },
@@ -220,11 +220,11 @@
         "calculation": {
             "weights": {
                 "ema": {
-                    "base": 0.3,
+                    "base": 0.4,
                     "dynamic_adjustment": true
                 },
                 "rsi": {
-                    "base": 0.4,
+                    "base": 0.3,
                     "dynamic_adjustment": true
                 },
                 "volume": {
@@ -238,16 +238,16 @@
     "performance_metrics": {
         "tracking": {
             "win_rate": {
-                "minimum_threshold": 0.55,
+                "minimum_threshold": 0.45,
                 "evaluation_period": "1D"
             },
             "risk_reward": {
-                "minimum_ratio": 1.5,
-                "target_ratio": 2.0
+                "minimum_ratio": 1.2,
+                "target_ratio": 1.8
             },
             "consecutive_trades": {
-                "max_losses": 3,
-                "required_win_after_max_losses": 2
+                "max_losses": 4,
+                "required_win_after_max_losses": 1
             },
             "profit_factor": {
                 "minimum": 1.2,
