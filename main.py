@@ -120,7 +120,7 @@ def parse_arguments() -> argparse.Namespace:
     # ADDED: New audit argument
     parser.add_argument(
         '--audit',
-        choices=['mt5', 'dashboard', 'strategy', 'backtest', 'base', 'run_backtest', 'calculations', 'all'],
+        choices=['mt5', 'trading_hours', 'bar_timestamps', 'dashboard', 'strategy', 'backtest', 'base', 'run_backtest', 'calculations', 'all'],
         help='Run audit on specified module(s)'
     )
 

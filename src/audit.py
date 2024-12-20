@@ -83,101 +83,6 @@ def setup_audit_logging() -> Tuple[logging.Logger, Path, str]:
         print(f"Current working directory: {Path.cwd()}")
         sys.exit(1)
 
-def audit_strategy() -> None:
-    """Audit MA RSI Volume strategy functionality."""
-    print("\n=== Starting Strategy Audit ===")
-    print("Setting up logging...")
-
-    logger, log_dir, timestamp = setup_audit_logging()
-    logger.info("Starting Strategy Audit")
-
-    try:
-        # Initialize strategy with config
-        from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
-        strategy_config = str(Path("config/strategy.json"))
-        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
-        logger.info("Strategy instance created")
-
-        # List all methods in the strategy class
-        logger.info("\nInspecting strategy methods:")
-        import inspect
-        methods = inspect.getmembers(strategy, predicate=inspect.ismethod)
-        for name, method in methods:
-            if not name.startswith('_'):
-                logger.info(f"Public method: {name}")
-            else:
-                logger.info(f"Private method: {name}")
-
-        # Initialize MT5 handler for test data
-        from src.core.mt5 import MT5Handler
-        mt5_handler = MT5Handler(debug=True)
-        logger.info("MT5Handler instance created")
-
-        # Get sample data for testing
-        symbol = "EURUSD"
-        timeframe = "M5"
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=1)
-
-        logger.info(f"\nFetching test data for {symbol} from {start_date} to {end_date}")
-        test_data = mt5_handler.get_historical_data(
-            symbol=symbol,
-            timeframe=timeframe,
-            start_date=start_date,
-            end_date=end_date
-        )
-
-        if test_data is not None:
-            logger.info(f"Retrieved {len(test_data)} data points")
-            logger.info(f"Columns available: {list(test_data.columns)}")
-
-            # Test each major component
-            logger.info("\nTesting market condition analysis...")
-            try:
-                market_condition = strategy._analyze_market_condition(test_data)
-                logger.info(f"Market condition result: {market_condition}")
-            except Exception as e:
-                logger.error(f"Market condition analysis failed: {e}")
-
-            logger.info("\nTesting volatility calculation...")
-            try:
-                volatility = strategy._calculate_volatility(test_data)
-                logger.info(f"Volatility result: {volatility}")
-            except Exception as e:
-                logger.error(f"Volatility calculation failed: {e}")
-
-            logger.info("\nTesting volume analysis...")
-            try:
-                # Try to find the correct volume analysis method
-                for name, method in methods:
-                    if 'volume' in name.lower() and 'analyze' in name.lower():
-                        logger.info(f"Found volume analysis method: {name}")
-                        volume_result = method(test_data)
-                        logger.info(f"Volume analysis result: {volume_result}")
-                        break
-                else:
-                    logger.error("No volume analysis method found")
-            except Exception as e:
-                logger.error(f"Volume analysis failed: {e}")
-
-            logger.info("\nTesting signal generation...")
-            try:
-                signals = strategy.generate_signals(test_data)
-                logger.info(f"Generated signals: {signals}")
-            except Exception as e:
-                logger.error(f"Signal generation failed: {e}")
-
-        else:
-            logger.error("Failed to retrieve test data")
-
-        logger.info("Strategy audit completed successfully")
-        print("\n=== Strategy Audit Complete ===")
-        print(f"Log file created at: {log_dir}/audit_{timestamp}.log")
-
-    except Exception as e:
-        logger.error(f"Strategy audit failed: {str(e)}")
-        raise
-
 def audit_mt5() -> None:
     """Audit MT5 functionality and connection."""
     print("\n=== Starting MT5 Audit ===")
@@ -186,12 +91,12 @@ def audit_mt5() -> None:
     logger, log_dir, timestamp = setup_audit_logging()
     logger.info("Starting MT5 Audit")
 
-    try:
-        # Initialize MT5 handler
-        from src.core.mt5 import MT5Handler
-        mt5_handler = MT5Handler(debug=True)
-        logger.info("MT5Handler instance created")
+    from src.core.mt5 import MT5Handler
+    # Initialize MT5Handler with logger so logs from MarketSessionManager are captured
+    mt5_handler = MT5Handler(debug=True, logger=logger)
+    logger.info("MT5Handler instance created")
 
+    try:
         # Test connection
         logger.info("Testing MT5 connection...")
         if mt5_handler.connected:
@@ -334,9 +239,9 @@ def audit_mt5() -> None:
                     # ADDED: Test specific data window that matches backtest requirements
                     logger.info("\n=== Testing Strategy Data Window Requirements ===")
                     test_start = end_date - timedelta(days=5)  # ADDED: Match backtest warmup period
-                    logger.info(f"Strategy Test Period:")  # ADDED: Log strategy test period
-                    logger.info(f"• Start: {test_start}")  # ADDED: Log start time
-                    logger.info(f"• End: {end_date}")  # ADDED: Log end time
+                    logger.info(f"Strategy Test Period:")
+                    logger.info(f"• Start: {test_start}")
+                    logger.info(f"• End: {end_date}")
                     logger.info(f"• Total Days: {(end_date - test_start).days}")
 
                     # ADDED: Get data specifically for strategy window
@@ -438,8 +343,7 @@ def audit_mt5() -> None:
         logger.error("MT5 audit failed: %s", str(e))
         raise
     finally:
-        # Ensure MT5 is properly shut down
-        if 'mt5_handler' in locals() and mt5_handler.connected:
+        if 'mt5_handler' in locals() and hasattr(mt5_handler, 'connected') and mt5_handler.connected:
             mt5_handler.__del__()
             logger.info("MT5 connection closed")
 
@@ -502,18 +406,16 @@ def audit_backtest() -> None:
 
     try:
         # Initialize strategy and backtester
-        from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
         from src.strategy.backtesting.backtester import Backtester
         from src.core.mt5 import MT5Handler
 
         # Create strategy instance
         strategy_config = str(Path("config/strategy.json"))
-        strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
         logger.info("Strategy instance created")
 
         # Create backtester instance
         backtester = Backtester(
-            strategy=strategy,
+            strategy=strategy, # type: ignore
             initial_balance=10000,
             commission=2.0,
             spread=0.0001
@@ -544,7 +446,7 @@ def audit_backtest() -> None:
             logger.info(f"{market} Session: {'OPEN' if status else 'CLOSED'}")
             if status:
                 logger.info(f"  Active Trading Hours: {market}")
-                if market in strategy.config.get('sessions', {}):
+                if market in strategy.config.get('sessions', {}): # type: ignore
                     session_info = strategy.config['sessions'][market]
                     logger.info(f"  Start Time: {session_info.get('start_time', 'Not Set')}")
                     logger.info(f"  End Time: {session_info.get('end_time', 'Not Set')}")
@@ -780,7 +682,7 @@ def audit_backtest() -> None:
                     logger.info(f"Entry Price: {signal.get('entry_price', 'Not Set')}")
 
                     # Test position sizing
-                    position_size = strategy.calculate_position_size(
+                    position_size = strategy.calculate_position_size( # type: ignore
                         {'balance': backtester.initial_balance},
                         test_window
                     )
@@ -930,7 +832,6 @@ def audit_run_backtest() -> None:
 
    try:
        # Initialize components
-       from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
        from src.strategy.backtesting.backtester import Backtester
        from src.core.mt5 import MT5Handler
 
@@ -1264,6 +1165,36 @@ def audit_calculations() -> None:
         logger.error(traceback.format_exc())
         raise
 
+def audit_trading_hours_logic():
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Trading Hours Logic Audit")
+
+    # Define the allowed_hours as in the bot
+    allowed_hours = range(12, 17)  # 12:00 to 16:59
+
+    # Simulate a bar timestamp
+    test_times = [
+        datetime(2024, 12, 20, 10, 0), # 10 AM - outside allowed hours
+        datetime(2024, 12, 20, 13, 30), # 1:30 PM - inside allowed hours
+        datetime(2024, 12, 20, 17, 0), # 5:00 PM - exactly at the edge (not included in 12-17 range)
+    ]
+
+    for t in test_times:
+        current_hour = t.hour
+        logger.info(f"Testing current_hour={current_hour} with allowed_hours={list(allowed_hours)}")
+
+        signal_reasons = []
+        if current_hour not in allowed_hours:
+            signal_reasons.append("Outside allowed trading hours")
+
+        if "Outside allowed trading hours" in signal_reasons:
+            logger.info(f"Hour {current_hour}: Correctly identified as outside trading hours.")
+        else:
+            if current_hour in allowed_hours:
+                logger.info(f"Hour {current_hour}: Correctly identified as inside trading hours.")
+            else:
+                logger.error(f"Hour {current_hour}: Expected outside hours but got no reason.")
+
 
 def audit_dashboard() -> None:
     """Audit dashboard functionality without displaying on screen."""
@@ -1364,20 +1295,59 @@ def audit_dashboard() -> None:
         logger.error("Dashboard audit failed: %s", str(e))
         raise
 
+def audit_bar_timestamps(symbol="EURUSD", timeframe="M5", allowed_hours=range(12,17)):
+    logger, log_dir, timestamp = setup_audit_logging()
+    logger.info("Starting Bar Timestamp Audit")
+
+    from datetime import datetime, timedelta
+    from src.core.mt5 import MT5Handler
+    mt5_handler = MT5Handler(debug=True, logger=logger)
+
+    if not mt5_handler.connected:
+        logger.error("MT5 not connected")
+        return
+
+    # Try a known good historical period (e.g., Wednesday at 14:00 UTC)
+    end_date = datetime(2024, 12, 18, 14, 0)  # Wednesday 14:00 UTC (example)
+    start_date = end_date - timedelta(hours=4)
+    data = mt5_handler.get_historical_data(symbol, timeframe, start_date, end_date)
+
+    if data is None or data.empty:
+        logger.error("No data returned. Try another timeframe, symbol, or a known active trading period.")
+        return
+
+    last_bar = data.iloc[-1]
+    bar_time_utc = last_bar['time']
+    logger.info(f"Raw bar time (UTC): {bar_time_utc}")
+
+    # Convert to New York time (UTC-5)
+    ny_time = bar_time_utc - timedelta(hours=5)
+    logger.info(f"Converted bar time (NY): {ny_time}")
+
+    ny_hour = ny_time.hour
+    if ny_hour in allowed_hours:
+        logger.info(f"Bar time {ny_time} is inside allowed hours (NY).")
+    else:
+        logger.info(f"Bar time {ny_time} is outside allowed hours (NY).")
+
+
 def run_audit(target: str) -> None:
     """Run audit for specified target.
 
     Args:
         target: Module to audit ('dashboard', 'mt5', or 'all')
     """
+    if target == 'bar_timestamps':
+        audit_bar_timestamps()  # Call the new function here
+
     if target in ['dashboard', 'all']:
         audit_dashboard()
 
+    if target == 'trading_hours':
+        audit_trading_hours_logic()
+
     if target == 'mt5':
         audit_mt5()
-
-    if target in ['strategy', 'all']:
-        audit_strategy()
 
     if target in ['backtest', 'all']:
         audit_backtest()

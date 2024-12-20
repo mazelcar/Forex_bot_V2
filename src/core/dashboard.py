@@ -101,6 +101,22 @@ class Dashboard:
             if self.log_level == 'DEBUG':
                 print(f"Error: {str(e)}")
 
+    def render_signal(self, signal_data: Dict):
+        print("\nCurrent Signal:")
+        print("-" * 20)
+        if not signal_data or signal_data["type"] == "NONE":
+            print("No current signal or signal too weak to trade.")
+            if "reasons" in signal_data:
+                print("Reasons:")
+                for r in signal_data["reasons"]:
+                    print(f" - {r}")
+        else:
+            print(f"Type: {signal_data['type']}")
+            print(f"Strength: {signal_data['strength']}")
+            print("Reasons:")
+            for r in signal_data['reasons']:
+                print(f" - {r}")
+
     def render_footer(self):
         """Render dashboard footer."""
         print("\nPress Ctrl+C to exit")
@@ -124,6 +140,7 @@ class Dashboard:
             self.render_positions(data.get('positions', []))
             self.render_market_status(data.get('market', {}))
             self.render_system_status(data.get('system', {}))
+            self.render_signal(data.get('signal', {}))
             self.render_footer()
             self.last_update = datetime.now()
         except Exception as e:

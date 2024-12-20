@@ -10,14 +10,14 @@ Handles core MetaTrader5 functionality:
 Author: mazelcar
 Created: December 2024
 """
-import pandas as pd
-import json
-from pathlib import Path
-import MetaTrader5 as mt5
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Union, Tuple
+import logging
 from src.core.market_sessions import MarketSessionManager
-
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+import MetaTrader5 as mt5
+import json
+import pandas as pd
 
 def create_default_config() -> bool:
     """Create default config directory and files if they don't exist."""
@@ -80,26 +80,34 @@ class MT5Handler:
         'D1': mt5.TIMEFRAME_D1,
     }
 
-    def __init__(self, debug: bool = False):
-        """Initialize MT5 handler.
+    def __init__(self, debug: bool = False, logger: Optional[logging.Logger] = None):
+        self.logger = logger or self._get_default_logger()
+        self.logger.debug("Initializing MT5Handler...")
 
-        Args:
-            debug: Enable debug logging
-        """
         self.connected = False
         self.config = get_mt5_config()
         self._initialize_mt5()
-        self.session_manager = MarketSessionManager()
+        # Pass the logger to MarketSessionManager
+        self.session_manager = MarketSessionManager(logger=self.logger)
+
+    def _get_default_logger(self):
+        logger = logging.getLogger('MT5Handler')
+        logger.setLevel(logging.DEBUG if __name__ == "__main__" else logging.INFO)
+        ch = logging.StreamHandler()
+        ch.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+        logger.addHandler(ch)
+        return logger
 
     def _initialize_mt5(self) -> bool:
-        """Connect to MT5 terminal."""
         try:
             if not mt5.initialize():
+                self.logger.error("MT5 initialization failed")
                 return False
             self.connected = True
+            self.logger.debug("MT5 initialized successfully")
             return True
         except Exception as e:
-            print(f"MT5 initialization error: {e}")
+            self.logger.error(f"MT5 initialization error: {e}")
             return False
 
     def login(self, username: str, password: str, server: str) -> bool:
@@ -145,27 +153,9 @@ class MT5Handler:
             return {}
 
     def get_market_status(self) -> Dict:
-        """Get market status considering both MT5 and session times."""
         session_status = self.session_manager.get_status()
-
-        # Cross-reference with MT5 symbols
-        try:
-            for market, info in self.session_manager.sessions['sessions'].items():
-                # Check if any pair for this session is tradeable
-                pairs = info.get('pairs', [])
-                market_tradeable = any(
-                    mt5.symbol_info(pair).trade_mode != 0
-                    for pair in pairs
-                    if mt5.symbol_info(pair) is not None
-                )
-                # Market is only open if both session time and MT5 allow trading
-                session_status['status'][market] &= market_tradeable
-
-            session_status['overall_status'] = 'OPEN' if any(session_status['status'].values()) else 'CLOSED'
-
-        except Exception as e:
-            print(f"Error checking MT5 market status: {e}")
-
+        # For now, do not filter by trade_mode
+        session_status['overall_status'] = 'OPEN' if any(session_status['status'].values()) else 'CLOSED'
         return session_status
 
     def place_trade(self, symbol: str, order_type: str, volume: float,
@@ -401,6 +391,8 @@ class MT5Handler:
             return False
 
     def __del__(self):
-        """Clean up MT5 connection."""
-        if self.connected:
+        # Ensure we handle the case where connected might not be set
+        if hasattr(self, 'connected') and self.connected:
             mt5.shutdown()
+            if self.logger:
+                self.logger.debug("MT5 connection closed in __del__")
