@@ -93,7 +93,7 @@ def audit_strategy() -> None:
 
     try:
         # Initialize strategy with config
-        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
         strategy_config = str(Path("config/strategy.json"))
         strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
         logger.info("Strategy instance created")
@@ -453,7 +453,7 @@ def audit_base_strategy() -> None:
 
     try:
         # We'll use MA_RSI_Volume_Strategy since it inherits from base Strategy
-        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
         strategy_config = str(Path("config/strategy.json"))
         strategy = MA_RSI_Volume_Strategy(config_file=strategy_config)
         logger.info("Strategy instance created")
@@ -502,8 +502,8 @@ def audit_backtest() -> None:
 
     try:
         # Initialize strategy and backtester
-        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
-        from src.strategy.backtesting import Backtester
+        from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.strategy.backtesting.backtester import Backtester
         from src.core.mt5 import MT5Handler
 
         # Create strategy instance
@@ -930,8 +930,8 @@ def audit_run_backtest() -> None:
 
    try:
        # Initialize components
-       from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
-       from src.strategy.backtesting import Backtester
+       from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
+       from src.strategy.backtesting.backtester import Backtester
        from src.core.mt5 import MT5Handler
 
        strategy_config = str(Path("config/strategy.json"))
@@ -1087,7 +1087,7 @@ def audit_calculations() -> None:
 
     try:
         # Setup test environment
-        from src.strategy.ma_rsi_volume import MA_RSI_Volume_Strategy
+        from src.strategy.strategies.ma_rsi_volume import MA_RSI_Volume_Strategy
         from src.core.mt5 import MT5Handler
         import MetaTrader5 as mt5
 

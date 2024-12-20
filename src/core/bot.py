@@ -12,13 +12,6 @@ the necessary components, such as the dashboard, and runs the main bot loop. The
 bot loop updates the dashboard with the latest system data, which can include
 account information, open positions, market status, and overall system health.
 
-The bot can operate in two modes: "auto" and "manual". In "auto" mode, the bot
-will execute trades automatically based on its trading strategy. In "manual" mode,
-the bot will require user confirmation before executing any trades.
-
-The bot also supports debug logging, which can provide detailed operational
-information for troubleshooting and development purposes.
-
 Author: mazelcar
 Created: December 2024
 """

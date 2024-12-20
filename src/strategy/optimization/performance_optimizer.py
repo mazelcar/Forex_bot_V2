@@ -13,6 +13,7 @@ Created: December 2024
 
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
+from venv import logger
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -47,19 +48,82 @@ class PerformanceOptimizer:
             }
         }
 
+    def _get_trading_session(self, hour: int) -> str:
+        """Determine trading session based on hour."""
+        if 21 <= hour or hour < 6:
+            return 'Sydney'
+        elif 23 <= hour or hour < 8:
+            return 'Tokyo'
+        elif 8 <= hour < 17:
+            return 'London'
+        elif 13 <= hour < 22:
+            return 'New York'
+        return 'Off-Session'
+
+    def _analyze_timeframe(self, trades: pd.DataFrame, timeframe: str) -> Dict:
+        """Analyze trading performance for a specific timeframe."""
+        try:
+            metrics = {}
+
+            if timeframe == '1H':
+                grouper = trades.groupby('hour')
+            elif timeframe == '4H':
+                trades['4h_block'] = trades['hour'] // 4
+                grouper = trades.groupby('4h_block')
+            else:  # Daily
+                trades['date'] = trades['entry_time'].dt.date
+                grouper = trades.groupby('date')
+
+            for name, group in grouper:
+                if len(group) >= self.config.get('min_trades', 10):
+                    window_metrics = {
+                        'total_trades': len(group),
+                        'winning_trades': len(group[group['profit'] > 0]),
+                        'total_profit': group['profit'].sum(),
+                        'avg_profit': group['profit'].mean(),
+                        'max_drawdown': self._calculate_drawdown(group),
+                        'win_rate': len(group[group['profit'] > 0]) / len(group),
+                        'profit_factor': self._calculate_profit_factor(group),
+                        'sharpe_ratio': self._calculate_sharpe_ratio(group),
+                        'risk_reward': self._calculate_risk_reward(group),
+                        'trades': len(group)
+                    }
+
+                    # Add volatility metrics
+                    if 'high' in group and 'low' in group:
+                        window_metrics['avg_volatility'] = (
+                            (group['high'] - group['low']).mean()
+                        )
+
+                    # Add volume metrics if available
+                    if 'volume' in group:
+                        window_metrics['avg_volume'] = group['volume'].mean()
+                        window_metrics['volume_trend'] = (
+                            group['volume'].pct_change().mean()
+                        )
+
+                    metrics[name] = window_metrics
+
+            return metrics
+        except Exception as e:
+            logger.error(f"Error in timeframe analysis: {str(e)}")
+            return {}
+
+
+
     def analyze_time_windows(self, trades: pd.DataFrame, time_frames: Optional[List[str]] = None) -> Dict:
-        """Analyze performance across different time windows.
+        """Analyze performance across different time windows with enhanced metrics.
 
         Args:
             trades: DataFrame containing trade history with columns:
-                   - entry_time: Trade entry timestamp
-                   - exit_time: Trade exit timestamp
-                   - profit: Trade profit/loss
-                   - type: Trade type (BUY/SELL)
+                - entry_time: Trade entry timestamp
+                - exit_time: Trade exit timestamp
+                - profit: Trade profit/loss
+                - type: Trade type (BUY/SELL)
             time_frames: Optional list of time frames to analyze (e.g., ['1H', '4H', 'D'])
 
         Returns:
-            Dictionary containing performance metrics by time window
+            Dictionary containing comprehensive performance metrics by time window
         """
         try:
             if time_frames is None:
@@ -69,39 +133,89 @@ class PerformanceOptimizer:
             print(f"Time frames to analyze: {time_frames}")
             print(f"Total trades: {len(trades)}")
 
+            # Ensure datetime format
+            trades['entry_time'] = pd.to_datetime(trades['entry_time'])
+            trades['exit_time'] = pd.to_datetime(trades['exit_time'])
+
+            # Add session information
+            trades['hour'] = trades['entry_time'].dt.hour
+            trades['session'] = trades['hour'].apply(self._get_trading_session)
+
+            # Calculate base metrics
+            trades['duration'] = (trades['exit_time'] - trades['entry_time']).dt.total_seconds() / 3600
+            trades['cumulative_profit'] = trades['profit'].cumsum()
+
             results = {}
             for tf in time_frames:
                 print(f"\nAnalyzing {tf} time frame...")
 
-                # Resample trades to the given timeframe
-                trades['hour'] = trades['entry_time'].dt.hour
-                trades['date'] = trades['entry_time'].dt.date
+                # Get metrics for this timeframe
+                window_metrics = self._analyze_timeframe(trades, tf)
 
-                if tf == '1H':
-                    grouper = trades.groupby('hour')
-                elif tf == '4H':
-                    trades['4h_block'] = trades['hour'] // 4
-                    grouper = trades.groupby('4h_block')
-                else:  # Daily
-                    grouper = trades.groupby('date')
+                # Add session analysis
+                session_metrics = self._analyze_sessions(trades)
 
-                # Calculate metrics for each time window
-                metrics = {}
-                for name, group in grouper:
-                    if len(group) >= self.config['min_trades']:
-                        metrics[name] = self._calculate_window_metrics(group)
+                # Combine metrics
+                results[tf] = {
+                    'window_metrics': window_metrics,
+                    'session_metrics': session_metrics
+                }
 
-                results[tf] = self._rank_time_windows(metrics)
+                # Rank and score windows
+                ranked_windows = self._rank_time_windows(window_metrics)
+                results[tf]['rankings'] = ranked_windows
 
-                print(f"Analyzed {len(metrics)} windows in {tf} timeframe")
-                self._print_top_windows(results[tf], tf)
+                print(f"Analyzed {len(window_metrics)} windows in {tf} timeframe")
+                self._print_top_windows(ranked_windows, tf)
+
+                # Add detailed session analysis
+                print("\nSession Performance Summary:")
+                for session, metrics in session_metrics.items():
+                    print(f"\n{session} Session:")
+                    print(f"  Total Trades: {metrics['total_trades']}")
+                    print(f"  Win Rate: {metrics['win_rate']*100:.1f}%")
+                    print(f"  Profit Factor: {metrics['profit_factor']:.2f}")
+                    print(f"  Average Profit: ${metrics['avg_profit']:.2f}")
 
             return results
 
         except Exception as e:
-            print(f"Error analyzing time windows: {str(e)}")
+            logger.error(f"Error analyzing time windows: {str(e)}")
             import traceback
-            print(traceback.format_exc())
+            logger.error(traceback.format_exc())
+            return {}
+
+    def _analyze_sessions(self, trades: pd.DataFrame) -> Dict:
+        """Analyze performance by trading session."""
+        try:
+            session_metrics = {}
+            for session in trades['session'].unique():
+                session_trades = trades[trades['session'] == session]
+
+                if len(session_trades) > 0:
+                    metrics = {
+                        'total_trades': len(session_trades),
+                        'winning_trades': len(session_trades[session_trades['profit'] > 0]),
+                        'total_profit': session_trades['profit'].sum(),
+                        'avg_profit': session_trades['profit'].mean(),
+                        'win_rate': len(session_trades[session_trades['profit'] > 0]) / len(session_trades),
+                        'profit_factor': self._calculate_profit_factor(session_trades),
+                        'avg_duration': session_trades['duration'].mean(),
+                        'best_trade': session_trades['profit'].max(),
+                        'worst_trade': session_trades['profit'].min(),
+                        'avg_drawdown': self._calculate_drawdown(session_trades)
+                    }
+
+                    # Add time-based analysis
+                    by_hour = session_trades.groupby(session_trades['entry_time'].dt.hour)
+                    metrics['best_hour'] = by_hour['profit'].mean().idxmax()
+                    metrics['worst_hour'] = by_hour['profit'].mean().idxmin()
+
+                    session_metrics[session] = metrics
+
+            return session_metrics
+        except Exception as e:
+            logger.error(f"Error in session analysis: {str(e)}")
             return {}
 
     def _calculate_window_metrics(self, trades: pd.DataFrame) -> Dict:
@@ -211,21 +325,32 @@ class PerformanceOptimizer:
         """
         report = ["=== Session Performance Report ===\n"]
 
-        for timeframe, windows in ranked_windows.items():
+        for timeframe, window_data in ranked_windows.items():
             report.append(f"\nTimeframe: {timeframe}")
             report.append("-" * 40)
 
-            for i, (window, data) in enumerate(windows.items(), 1):
-                if i > 5:  # Top 5 windows per timeframe
-                    break
-                report.append(f"\n{i}. Window {window}")
-                report.append(f"   Performance Score: {data['score']:.3f}")
-                metrics = data['metrics']
-                report.append(f"   Total Trades: {metrics['total_trades']}")
-                report.append(f"   Win Rate: {metrics['win_rate']*100:.1f}%")
-                report.append(f"   Profit Factor: {metrics['profit_factor']:.2f}")
-                report.append(f"   Average Profit: {metrics['avg_profit']:.2f}")
-                report.append(f"   Risk-Reward Ratio: {metrics['risk_reward']:.2f}")
+            # Handle both window metrics and session metrics
+            if 'window_metrics' in window_data:
+                report.append("\nWindow Performance:")
+                for window, metrics in window_data['window_metrics'].items():
+                    report.append(f"\nWindow: {window}")
+                    report.append(f"Total Trades: {metrics.get('total_trades', 0)}")
+                    report.append(f"Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
+                    report.append(f"Profit Factor: {metrics.get('profit_factor', 0):.2f}")
+                    report.append(f"Average Profit: ${metrics.get('avg_profit', 0):.2f}")
+
+            if 'session_metrics' in window_data:
+                report.append("\nSession Performance:")
+                for session, metrics in window_data['session_metrics'].items():
+                    report.append(f"\n{session} Session:")
+                    report.append(f"Total Trades: {metrics.get('total_trades', 0)}")
+                    report.append(f"Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
+                    report.append(f"Profit Factor: {metrics.get('profit_factor', 0):.2f}")
+                    report.append(f"Average Profit: ${metrics.get('avg_profit', 0):.2f}")
+                    if 'best_hour' in metrics:
+                        report.append(f"Best Hour: {metrics['best_hour']:02d}:00")
+                    if 'worst_hour' in metrics:
+                        report.append(f"Worst Hour: {metrics['worst_hour']:02d}:00")
 
         return "\n".join(report)
 
