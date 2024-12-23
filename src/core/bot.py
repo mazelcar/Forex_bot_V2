@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from src.core.dashboard import Dashboard
 from src.core.mt5 import MT5Handler
 from src.strategy.support_resistance import identify_support_resistance_zones, is_bounce_candle
-from src.strategy.signal_manager import SignalManager
+from strategy.signal_generator import SignalManager
 
 def is_within_allowed_hours(current_hour, allowed_hours=range(12,17)):
         return current_hour in allowed_hours
