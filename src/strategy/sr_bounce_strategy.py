@@ -1,43 +1,120 @@
-import os
-import json
 import logging
-import numpy as np
+import json
+from typing import List, Optional, Dict, Any
+
 import pandas as pd
-from datetime import datetime, timedelta
-from typing import Dict, Optional, Any, Tuple
 
-from src.strategy.technical_indicators import calculate_atr
-from src.strategy.price_analysis import detect_price_hovering
-from src.strategy.level_analysis import (
-    identify_yearly_extremes,
-    merge_levels_to_zones,
-    calculate_cleanliness_score
-)
+# We keep is_volume_sufficient if you still want that function from volume_analysis:
+from src.strategy.volume_analysis import is_volume_sufficient
 
-# Validation
-from src.strategy.volume_analysis import (
-    calculate_volume_ma,
-    is_volume_sufficient,
-    VolumeValidator
-)
 from src.strategy.news_validator import NewsValidator
-
-# Signal and Trade Management
 from src.strategy.signal_generator import SignalGenerator
 from src.strategy.trade_manager import TradeManager
+from src.strategy.level_analysis import identify_yearly_extremes, merge_levels_to_zones
+
+
+# Functions for charting trading zones for S/R zones
+import pandas as pd
+from typing import List
+
+def identify_sr_yearly(df_daily: pd.DataFrame, buffer_pips: float = 0.003) -> List[float]:
+        if df_daily.empty:
+            return []
+
+        # The absolute extremes from your daily data
+        yearly_high = df_daily["high"].max()
+        yearly_low = df_daily["low"].min()
+
+        # Subtract buffer from the top, add buffer to the bottom
+        # so you avoid placing lines exactly on the absolute extremes
+        adjusted_high = yearly_high - buffer_pips
+        adjusted_low = yearly_low + buffer_pips
+
+        # If the buffer is too large (makes them cross over), just return the raw extremes
+        if adjusted_low >= adjusted_high:
+            # fallback: if the difference between high and low is smaller than 2 * buffer
+            return [yearly_low, yearly_high]
+
+        return [adjusted_low, adjusted_high]
+
+def identify_sr_monthly(
+    df_h1: pd.DataFrame,
+    months: int = 2,
+    monthly_buffer: float = 0.0015
+) -> List[float]:
+    """
+    Identifies a broad monthly support & resistance from H1 data
+    over the last X 'months' (~30.44 days each).
+
+    Returns [monthly_support, monthly_resistance].
+    """
+    if df_h1.empty:
+        return []
+
+    # 1) Figure out the cutoff date/time (X months back from the last bar).
+    last_time = pd.to_datetime(df_h1["time"].max())
+    approx_days = int(30.44 * months)
+    cutoff_time = last_time - pd.Timedelta(days=approx_days)
+
+    # 2) Filter the dataset
+    recent_df = df_h1[df_h1["time"] >= cutoff_time]
+    if recent_df.empty:
+        return []
+
+    # 3) Highest & lowest in this range
+    highest = recent_df["high"].max()
+    lowest  = recent_df["low"].min()
+
+    # 4) Apply monthly buffer: push the top down & bottom up by monthly_buffer
+    monthly_res  = highest - monthly_buffer
+    monthly_supp = lowest  + monthly_buffer
+
+    return [float(monthly_supp), float(monthly_res)]
+
+def identify_sr_weekly(df_h1: pd.DataFrame, weeks: int = 2, weekly_buffer: float = 0.00075) -> list[float]:
+    if df_h1.empty:
+        return []
+
+    # 1) Find the most recent timestamp in df_h1
+    last_time = pd.to_datetime(df_h1["time"].max())
+
+    # 2) Convert weeks -> days, e.g. 2 weeks -> 14 days
+    total_days = weeks * 7
+    cutoff_time = last_time - pd.Timedelta(days=total_days)
+
+    # 3) Filter rows to only those after cutoff_time
+    recent_df = df_h1[df_h1["time"] >= cutoff_time.strftime("%Y-%m-%d %H:%M:%S")]
+    if recent_df.empty:
+        return []
+
+    # 4) Highest high and lowest low in the recent subset
+    highest = float(recent_df["high"].max())
+    lowest  = float(recent_df["low"].min())
+
+    # 5) Subtract a small buffer from the highest, add to the lowest
+    weekly_res = highest - weekly_buffer
+    weekly_supp = lowest + weekly_buffer
+
+    # Return in ascending order: support first, then resistance
+    return [weekly_supp, weekly_res]
+
 
 class SR_Bounce_Strategy:
     """
     Shows an advanced S/R bounce approach with:
       - 2-bounce volume logic
-      - optional momentum filter (RSI + ADX)
-      - news avoidance
+      - (Optional) momentum filter (RSI + ADX)
+      - (Optional) news avoidance
       - dynamic exit conditions
     """
 
-    def __init__(self, config_file: Optional[str] = None, logger: logging.Logger = None,
-                 news_file: str = "config/market_news.json"):
-        # 1. Load config first
+    def __init__(
+        self,
+        config_file: Optional[str] = None,
+        logger: logging.Logger = None,
+        news_file: str = "config/market_news.json"
+    ):
+        # 1) Default params (can be overwritten if config_file is provided)
         self.params = {
             "min_touches": 8,
             "min_volume_threshold": 380000.0,
@@ -51,36 +128,29 @@ class SR_Bounce_Strategy:
         if config_file:
             self._load_config(config_file)
 
-        # 2. Initialize logger
+        # 2) Setup logger
         self.logger = logger or self._create_default_logger()
 
-        # 3. Initialize validators and core components
-        #    Replace the old threshold-based volume validator with the new approach
-        #    For example, requiring 1.2x expansion factor, 3-bar lookback, time-of-day normalization
-        self.volume_validator = VolumeValidator(
-            expansion_factor=1.2,
-            lookback_bars=3,
-            time_adjustment=True
-        )
-
-        # For news events
+        # 3) News Validator (if you still want it)
         self.news_validator = NewsValidator(
             news_file=news_file,
             lookforward_minutes=self.params["lookforward_minutes"]
         )
 
+        # 4) Data structures for levels, etc.
         self.valid_levels = []
-        self.avg_atr = 0.0005
+        self.avg_atr = 0.0005  # Only if you use ATR; otherwise ignore.
 
-        # 4. Initialize signal generator and trade manager
-        #    Now pass self.volume_validator into SignalGenerator
+        # 5) Initialize SignalGenerator (notice we do NOT pass any volume_validator here)
         self.signal_generator = SignalGenerator(
-            self.volume_validator,
-            self.news_validator,
-            self.valid_levels,
-            self.params,
+            volume_validator=None,  # or remove param entirely if your SignalGenerator can handle that
+            news_validator=self.news_validator,
+            valid_levels=self.valid_levels,
+            params=self.params,
             log_file="results/signals_debug.log"
         )
+
+        # 6) Initialize TradeManager
         self.trade_manager = TradeManager(self.params["risk_reward"])
 
     def _load_config(self, config_file: str):
@@ -91,7 +161,7 @@ class SR_Bounce_Strategy:
         except Exception as e:
             print(f"[WARNING] Unable to load {config_file}: {e}")
 
-    def _create_default_logger(self):
+    def _create_default_logger(self) -> logging.Logger:
         logger = logging.getLogger("SR_Bounce_Strategy")
         logger.setLevel(logging.DEBUG)
         if not logger.handlers:
@@ -102,70 +172,36 @@ class SR_Bounce_Strategy:
             logger.addHandler(ch)
         return logger
 
-    def analyze_higher_timeframe_levels(self, df_htf: pd.DataFrame):
-        print("Entering analyze_higher_timeframe_levels with df_htf of length:", len(df_htf))
-        if df_htf.empty:
-            self.logger.warning("[analyze_higher_timeframe_levels] Received empty df.")
+    # -------------------------------------------------------
+    # Example pass-through to your signal generator
+    # -------------------------------------------------------
+    def update_weekly_levels(self, df_h1, weeks: int = 2, weekly_buffer: float = 0.00075):
+        """
+        Identify weekly S/R from the last 'weeks' of H1 data, apply a small buffer,
+        and merge into self.valid_levels.
+        """
+        w_levels = identify_sr_weekly(df_h1, weeks=weeks, weekly_buffer=weekly_buffer)
+        # w_levels is like [weekly_support, weekly_resistance]
+
+        if not w_levels:
+            self.logger.warning("No weekly levels found. (Empty data?)")
             return
 
-        # Get yearly extreme zones
-        high_zone, low_zone = identify_yearly_extremes(df_htf, buffer_pips=self.params["margin_pips"])
-        print(f"Identified extreme zones: high_zone={high_zone}, low_zone={low_zone}")
+        # Merge them into self.valid_levels. For simplicity, just extend and sort:
+        self.valid_levels.extend(w_levels)
+        self.valid_levels = sorted(set(self.valid_levels))  # remove duplicates, sort
+        self.logger.info(f"Weekly levels merged: {w_levels}  Now total: {len(self.valid_levels)}")
 
-        # 1) Create potential zones from rolling 20-bar windows
-        potential_levels = []
-        for period in range(len(df_htf) - 20):
-            window = df_htf.iloc[period : period + 20]
-            high_price = window['high'].max()
-            low_price  = window['low'].min()
-
-            # (Optional) skip levels in extreme zones if desired
-            # if (low_zone[0] <= high_price <= low_zone[1] or
-            #     high_zone[0] <= high_price <= high_zone[1] or
-            #     low_zone[0] <= low_price  <= low_zone[1]  or
-            #     high_zone[0] <= low_price <= high_zone[1]):
-            #     continue
-
-            potential_levels.extend([high_price, low_price])
-
-        # Remove duplicates and sort
-        potential_levels = sorted(set(potential_levels))
-        print(f"Potential levels (before merging): {potential_levels[:20]} ... (showing first 20 if large)")
-
-        # 2) Merge close levels into zones
-        level_zones = merge_levels_to_zones(potential_levels, pip_threshold=0.0003)
-        print("Zones after merging:", level_zones[:10], "... (showing first 10 if large)")
-
-        # 3) Validate each zone with cleanliness & volume
-        valid_levels = []
-        for zone_start, zone_end in level_zones:
-            zone_mid = (zone_start + zone_end) / 2
-            score = calculate_cleanliness_score(df_htf, zone_mid)
-
-            print(f"Zone ({zone_start:.4f}-{zone_end:.4f}) mid={zone_mid:.4f}, cleanliness_score={score}")
-
-            if score >= 4:  # Only keep levels with good cleanliness
-                volume_ma = calculate_volume_ma(df_htf['tick_volume'])
-                if is_volume_sufficient(df_htf['tick_volume'].iloc[-1], volume_ma.iloc[-1]):
-                    valid_levels.append(zone_mid)
-
-        # 4) Assign final valid_levels, update signal generator
-        self.valid_levels = valid_levels
-        self.signal_generator.valid_levels = valid_levels
-
-        # 5) Calculate average ATR for reference
-        self.avg_atr = calculate_atr(df_htf, period=14)
-
-        print("Final valid_levels:", self.valid_levels)
-        self.logger.info(f"[SR_Bounce_Strategy] Valid levels loaded: {len(self.valid_levels)}")
-
-    def generate_signals(self, df_segment: pd.DataFrame) -> Dict[str, Any]:
+    def generate_signals(self, df_segment):
         return self.signal_generator.generate_signal(df_segment)
 
-    def validate_signal(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> bool:
+    def validate_signal(self, signal, df_segment):
         return self.signal_generator.validate_signal(signal, df_segment)
 
-    def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
+    # -------------------------------------------------------
+    # Trade Management
+    # -------------------------------------------------------
+    def calculate_stop_loss(self, signal, df_segment) -> float:
         return self.trade_manager.calculate_stop_loss(signal, df_segment)
 
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
@@ -174,5 +210,74 @@ class SR_Bounce_Strategy:
     def calculate_take_profit(self, entry_price: float, sl: float) -> float:
         return self.trade_manager.calculate_take_profit(entry_price, sl)
 
-    def check_exit(self, df_segment: pd.DataFrame, position: Dict[str, Any]) -> Tuple[bool, str]:
+    def check_exit(self, df_segment, position):
         return self.trade_manager.check_exit_conditions(df_segment, position)
+
+    # -------------------------------------------------------
+    # For completeness, your Trade inner-class or open_trade, etc.
+    # -------------------------------------------------------
+    class Trade:
+        def __init__(
+            self,
+            open_i: int,
+            open_time: str,
+            type: str,
+            entry_price: float,
+            sl: float,
+            tp: float,
+            size: float
+        ):
+            self.open_i = open_i
+            self.open_time = open_time
+            self.type = type
+            self.entry_price = entry_price
+            self.sl = sl
+            self.tp = tp
+            self.size = size
+
+            self.close_i = None
+            self.close_time = None
+            self.close_price = None
+            self.pnl = 0.0
+
+            self.entry_volume = 0.0
+            self.prev_3_avg_volume = 0.0
+            self.hour_avg_volume = 0.0
+
+            self.level = 0.0
+            self.distance_to_level = 0.0
+            self.level_type = ""
+
+        def to_dict(self) -> Dict:
+            return {
+                "open_i": self.open_i,
+                "open_time": self.open_time,
+                "type": self.type,
+                "entry_price": self.entry_price,
+                "sl": self.sl,
+                "tp": self.tp,
+                "size": self.size,
+                "close_i": self.close_i,
+                "close_time": self.close_time,
+                "close_price": self.close_price,
+                "pnl": self.pnl,
+                "entry_volume": self.entry_volume,
+                "prev_3_avg_volume": self.prev_3_avg_volume,
+                "hour_avg_volume": self.hour_avg_volume,
+                "level": self.level,
+                "distance_to_level": self.distance_to_level,
+                "level_type": self.level_type,
+            }
+
+    # Example exit_trade or open_trade if you still need them:
+    def exit_trade(self, df_segment, trade: "SR_Bounce_Strategy.Trade"):
+        # ...
+        return (False, 0.0, 0.0)
+
+    def close_trade(trade: "SR_Bounce_Strategy.Trade", bar, close_price: float, pnl: float) -> None:
+        # ...
+        pass
+
+    def open_trade(strategy: "SR_Bounce_Strategy", current_segment, balance: float, i: int):
+        # ...
+        pass

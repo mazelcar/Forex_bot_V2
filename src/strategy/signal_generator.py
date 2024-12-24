@@ -2,6 +2,8 @@ import pandas as pd
 from datetime import datetime
 import logging
 from typing import Optional, Dict, Any
+from src.strategy.volume_analysis import is_volume_sufficient
+
 
 class SignalGenerator:
     def __init__(
@@ -33,11 +35,10 @@ class SignalGenerator:
     def generate_signal(self, df_segment: pd.DataFrame) -> Dict[str, Any]:
         # 1) Basic checks
         if df_segment.empty or not self.valid_levels:
-            msg = "No data or no valid levels"
-            self.logger.debug(msg)
-            return self._create_no_signal(msg)
+            ...
+            return self._create_no_signal("No data or no valid levels")
 
-        # 2) Identify index of current (last) bar in df_segment
+        # 2) Identify last bar in df_segment
         last_idx = len(df_segment) - 1
         if last_idx < 0:
             return self._create_no_signal("df_segment has no rows")
@@ -45,44 +46,14 @@ class SignalGenerator:
         last_bar = df_segment.iloc[last_idx]
         current_time = last_bar['time']
 
-        # 3) Volume Check (New Approach: pass df_segment & last_idx)
-        if not self.volume_validator.is_volume_sufficient(df_segment, last_idx):
-            reason = f"Volume too low or no expansion at bar {last_idx}"
-            self.logger.debug(reason)
-            return self._create_no_signal(reason)
+        # 3) Volume check
+        if not is_volume_sufficient(df_segment, last_idx):
+            return self._create_no_signal("Volume too low...")
 
-        # 4) Session Filter
-        if not self._is_valid_session_time(current_time):
-            reason = f"Outside session hours (bar time={current_time})"
-            self.logger.debug(reason)
-            return self._create_no_signal(reason)
-
-        # 5) If all checks passed, proceed to check levels
-        #    We'll use the bar's close/open/high/low for bounce logic
+        # 4) If volume is OK, proceed:
         bar_volume = last_bar.get('tick_volume', 0.0)
         signal_dict = self._check_levels(last_bar, current_time, bar_volume)
-        self.logger.debug(f"Signal result: {signal_dict}")
         return signal_dict
-
-    def validate_signal(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> bool:
-        if signal["type"] == "NONE":
-            self.logger.debug(f"validate_signal: no trade because type=NONE, reasons={signal['reasons']}")
-            return False
-
-        last_bar = df_segment.iloc[-1]
-        cur_time = last_bar['time']
-
-        # Skip if news is near
-        if not self._validate_news(cur_time):
-            self.logger.debug(f"validate_signal: blocked by news at {cur_time}")
-            return False
-
-        # Momentum filter
-        if not self._validate_momentum(signal, df_segment):
-            self.logger.debug(f"validate_signal: blocked by momentum filter, signal={signal}")
-            return False
-
-        return True
 
     def _check_levels(self, last_bar, current_time, bar_volume) -> Dict[str, Any]:
         close_ = float(last_bar['close'])
@@ -154,20 +125,3 @@ class SignalGenerator:
             "level": None
         }
 
-    # ----------------------
-    # Extra Utility Methods:
-    # ----------------------
-    def _is_valid_session_time(self, bar_time) -> bool:
-        # Example: only trade from 07:00 to 16:00 UTC
-        hour = pd.to_datetime(bar_time).hour
-        return 7 <= hour < 16
-
-    def _validate_news(self, cur_time) -> bool:
-        # Example: skip if there's news within 30 minutes
-        # If you have a news validator, call it here
-        return True  # placeholder
-
-    def _validate_momentum(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> bool:
-        # Example: skip if RSI is above 80 for BUY or below 20 for SELL
-        # Or some ADX check. This is up to your strategy logic.
-        return True  # placeholder
