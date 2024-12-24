@@ -3,6 +3,52 @@ from typing import Dict, List
 
 import pandas as pd
 
+def analyze_trades(trades: List[Dict], initial_balance: float) -> Dict:
+        """
+        Compute basic performance metrics:
+        - total trades, win_rate, profit_factor, max_drawdown, total_pnl
+        """
+        import numpy as np
+
+        if not trades:
+            return {
+                "count": 0,
+                "win_rate": 0.0,
+                "profit_factor": 0.0,
+                "max_drawdown": 0.0,
+                "total_pnl": 0.0
+            }
+
+        wins = [t for t in trades if t["pnl"] > 0]
+        losses = [t for t in trades if t["pnl"] < 0]
+        total_win = sum(t["pnl"] for t in wins)
+        total_loss = abs(sum(t["pnl"] for t in losses))
+
+        count = len(trades)
+        win_rate = (len(wins) / count) * 100.0 if count else 0.0
+        profit_factor = (total_win / total_loss) if total_loss > 0 else np.inf
+        total_pnl = sum(t["pnl"] for t in trades)
+
+        # Max drawdown
+        running = initial_balance
+        peak = running
+        dd = 0.0
+        for t in trades:
+            running += t["pnl"]
+            if running > peak:
+                peak = running
+            drawdown = peak - running
+            if drawdown > dd:
+                dd = drawdown
+
+        return {
+            "count": count,
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "max_drawdown": dd,
+            "total_pnl": total_pnl
+        }
+
 
 class ReportWriter:
     def __init__(self, filepath: str):
@@ -51,12 +97,6 @@ class ReportWriter:
         self.file_handler.write(f"- Total PnL: ${stats['total_pnl']:.2f}\n")
         self.file_handler.write(f"- Final Balance: ${final_balance:.2f}\n\n")
 
-    def write_monte_carlo_section(self, mc_results: Dict):
-        self.file_handler.write("## Monte Carlo (1000 shuffles)\n\n")
-        self.file_handler.write(f"- Average Final: {mc_results['avg_final']:.2f}\n")
-        self.file_handler.write(f"- Worst Case: {mc_results['worst_case']:.2f}\n")
-        self.file_handler.write(f"- Best Case: {mc_results['best_case']:.2f}\n\n")
-
     def write_monthly_breakdown(self, monthly_data: Dict):
         self.file_handler.write("\n--- NARRATIVE MONTH/WEEK BREAKDOWN ---\n")
         for month, data in monthly_data.items():
@@ -103,3 +143,4 @@ class ReportWriter:
         self.write_sr_levels(monthly_levels, weekly_levels)
         self.file_handler.write("\n---\n")
         self.file_handler.write("**End of Report**\n")
+

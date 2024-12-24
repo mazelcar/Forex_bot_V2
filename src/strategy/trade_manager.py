@@ -1,7 +1,6 @@
 from typing import Any, Dict, Tuple
 import pandas as pd
 from src.strategy.price_analysis import detect_price_hovering
-from src.strategy.technical_indicators import calculate_atr
 
 
 class TradeManager:

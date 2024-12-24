@@ -2,20 +2,36 @@ import pandas as pd
 from datetime import datetime
 import logging
 from typing import Optional, Dict, Any
-from src.strategy.volume_analysis import is_volume_sufficient
+
+def is_volume_sufficient(
+    df: pd.DataFrame,
+    current_index: int,
+    lookback_bars: int = 5,
+    min_ratio: float = 0.8
+) -> bool:
+
+    if current_index < 1:
+        return False
+
+    current_vol = df.iloc[current_index]['tick_volume']
+    start_idx = max(current_index - lookback_bars, 0)
+    recent_vol = df['tick_volume'].iloc[start_idx:current_index]
+
+    if len(recent_vol) == 0:
+        return False
+
+    avg_vol = recent_vol.mean()
+    return current_vol >= (min_ratio * avg_vol)
+
 
 
 class SignalGenerator:
     def __init__(
         self,
-        volume_validator,
-        news_validator,
         valid_levels,
         params,
         log_file: str = "signals_debug.log"
     ):
-        self.volume_validator = volume_validator
-        self.news_validator = news_validator
         self.valid_levels = valid_levels
         self.params = params
         self.bounce_registry = {}
@@ -33,11 +49,6 @@ class SignalGenerator:
         self.logger.info("SignalGenerator initialized with log_file=%s", log_file)
 
     def generate_signal(self, df_segment: pd.DataFrame) -> Dict[str, Any]:
-        # 1) Basic checks
-        if df_segment.empty or not self.valid_levels:
-            ...
-            return self._create_no_signal("No data or no valid levels")
-
         # 2) Identify last bar in df_segment
         last_idx = len(df_segment) - 1
         if last_idx < 0:
