@@ -5,82 +5,163 @@ import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 import os
+
+# Import your local modules
 from src.core.mt5 import MT5Handler
 from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
 from src.strategy.report_writer import ReportWriter
-from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
 from src.strategy.report_writer import analyze_trades
 
-logging.basicConfig(
-    filename="runner_debug.log",
-    level=logging.DEBUG,
-    format="%(asctime)s [%(levelname)s] %(message)s"
-)
+# -------------------------------------------------------
+# Setup logging (Avoid multiple handlers)
+# -------------------------------------------------------
+def get_logger(name="runner", logfile="runner_debug.log"):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        fh = logging.FileHandler(logfile, mode='a')
+        fh.setLevel(logging.DEBUG)
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    return logger
 
-logging.debug("Entering load data")
+logger = get_logger(name="runner", logfile="runner_debug.log")
 
-def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_date=None) -> pd.DataFrame:
+
+def load_market_news(news_file="config/market_news.json") -> List[Dict]:
+    """Attempt to load market news JSON. If unavailable, return an empty list."""
+    import json
+    if not os.path.exists(news_file):
+        logger.warning(f"Market news file not found: {news_file}. Proceeding without it.")
+        return []
+
+    try:
+        with open(news_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except Exception as e:
+        logger.error(f"Error loading market_news.json: {str(e)}")
+        return []
+
+
+def load_data(
+    symbol="EURUSD",
+    timeframe="H1",
+    days=None,
+    start_date=None,
+    end_date=None,
+    max_retries=3
+) -> pd.DataFrame:
+    """
+    Enhanced data loading with validation.
+    """
     mt5 = MT5Handler(debug=True)
+
     if days and not start_date and not end_date:
         end_date = datetime.now()
         start_date = end_date - timedelta(days=days)
 
-    # Add retry logic
-    max_retries = 3
+    # Validate dates
+    if end_date and end_date > datetime.now():
+        print(f"ERROR: End date {end_date} is in the future")
+        return pd.DataFrame()
+
+    # Attempt multiple fetches
+    df = pd.DataFrame()
     for attempt in range(max_retries):
         try:
             df = mt5.get_historical_data(symbol, timeframe, start_date, end_date)
-
-            # Validate data completeness
             if df is not None and not df.empty:
-                time_diffs = df['time'].diff()
-                expected_diff = pd.Timedelta('1 hour') if timeframe == "H1" else pd.Timedelta('15 minutes')
-                gaps = time_diffs[time_diffs > expected_diff * 2]
+                df.sort_values("time", inplace=True)
+                df.reset_index(drop=True, inplace=True)
 
-                completeness = 1 - (len(gaps) / len(df))
-                if completeness >= 0.95:
-                    return df.sort_values("time").reset_index(drop=True)
-
-            # If data is incomplete, adjust time range and retry
-            if start_date:
-                start_date -= pd.Timedelta(days=5)
-            logging.warning(f"Retry {attempt + 1}: Adjusting time range for better data completeness")
-
+                # Validate the loaded data
+                if validate_data_for_backtest(df, timeframe):
+                    return df
+                else:
+                    logger.warning(f"Attempt {attempt+1}: Data validation failed")
+                    if start_date:
+                        start_date -= timedelta(days=5)
+            else:
+                if start_date:
+                    start_date -= timedelta(days=5)
+                logger.warning(f"Attempt {attempt+1}: Data empty or incomplete, shifting start_date back")
         except Exception as e:
-            logging.error(f"Attempt {attempt + 1} failed: {str(e)}")
+            logger.error(f"Attempt {attempt+1} failed: {str(e)}")
 
-    raise ValueError("Failed to load complete dataset after maximum retries")
+    return df  # Empty if all attempts failed
 
 
-def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> None:
+def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool:
+    """
+    Enhanced data validation checking for data quality issues.
+    Returns True if data is valid, False otherwise.
+    """
     if df.empty:
-        raise ValueError("No data loaded.")
+        print("ERROR: No data loaded.")
+        return False
 
+    # Check for future dates
+    current_time = datetime.now()
+    if pd.to_datetime(df['time'].max()) > current_time:
+        print(f"ERROR: Data contains future dates! Max date: {df['time'].max()}")
+        return False
+
+    # Basic data structure validation
     required_columns = ["time", "open", "high", "low", "close", "tick_volume"]
     missing_cols = [col for col in required_columns if col not in df.columns]
     if missing_cols:
-        raise ValueError(f"Data not valid: missing columns {missing_cols}")
+        print(f"ERROR: Missing columns: {missing_cols}")
+        return False
 
-    date_range = df["time"].max() - df["time"].min()
+    # Price integrity checks
+    df['spread'] = df['high'] - df['low']
+    avg_spread = df['spread'].mean()
+    max_allowed_spread = avg_spread * 5  # 5x average spread threshold
+
+    invalid_prices = df[
+        (df['high'] < df['low']) |  # Invalid OHLC
+        (df['close'] > df['high']) |
+        (df['close'] < df['low']) |
+        (df['open'] > df['high']) |
+        (df['open'] < df['low']) |
+        (df['spread'] > max_allowed_spread)  # Abnormal spreads
+    ]
+
+    if not invalid_prices.empty:
+        print("\nERROR: Found invalid price data:")
+        print(invalid_prices[['time', 'open', 'high', 'low', 'close', 'spread']].head())
+        return False
+
+    # Check for zero prices
+    if (df[['open', 'high', 'low', 'close']] == 0).any().any():
+        print("ERROR: Found zero prices in data")
+        return False
+
+    # Date analysis
+    df['time'] = pd.to_datetime(df['time'])
+    date_min = df["time"].min()
+    date_max = df["time"].max()
+    date_range = date_max - date_min
+    total_days = date_range.days
+
     print(f"\nData Range Analysis:")
-    print(f"Start: {df['time'].min()}")
-    print(f"End: {df['time'].max()}")
-    print(f"Total days: {date_range.days}")
+    print(f"Start: {date_min}")
+    print(f"End: {date_max}")
+    print(f"Total days: {total_days}")
 
-    # ---------------------------------------------------------
-    # Dynamically compute expected_bars based on timeframe
-    # ---------------------------------------------------------
+    # Expected bars calculation
     if timeframe == "M15":
-        bars_per_day = 24 * 4  # 4 bars per hour
+        bars_per_day = 4 * 24
     elif timeframe == "M5":
-        bars_per_day = 24 * 12
+        bars_per_day = 12 * 24
     elif timeframe == "H1":
         bars_per_day = 24
     else:
-        # Fallback or extended logic for other TFs
-        bars_per_day = 24 * 4  # old default
+        bars_per_day = 24
 
-    expected_bars = date_range.days * bars_per_day * (5/7)  # ignoring weekends
+    expected_bars = total_days * bars_per_day * (5/7)  # Excluding weekends
     actual_bars = len(df)
     completeness = (actual_bars / expected_bars) * 100
 
@@ -89,24 +170,43 @@ def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> None
     print(f"Actual bars: {actual_bars}")
     print(f"Data completeness: {completeness:.1f}%")
 
-    # Gap detection remains the same:
-    time_diffs = df["time"].diff()
-    if timeframe.startswith("M"):  # e.g. M15, M5
-        max_allowed_gap = pd.Timedelta(minutes=1.1 * int(timeframe[1:]))
-    elif timeframe.startswith("H"):
-        max_allowed_gap = pd.Timedelta(hours=1.1)  # allow ~1.1h gap
-    else:
-        max_allowed_gap = pd.Timedelta(minutes=16)  # old default
+    # Gap detection
+    df_sorted = df.sort_values("time")
+    time_diffs = df_sorted["time"].diff()
 
-    gaps = time_diffs[time_diffs > max_allowed_gap]
-    if not gaps.empty:
-        print(f"\nFound {len(gaps)} gaps in data larger than 1 bar")
-        print("Largest gaps:")
-        for idx in gaps.nlargest(3).index:
-            print(f"Gap of {time_diffs[idx]} at {df['time'][idx]}")
+    # Expected time difference based on timeframe
+    if timeframe.startswith("M"):
+        expected_diff = pd.Timedelta(minutes=int(timeframe[1:]))
+    elif timeframe.startswith("H"):
+        expected_diff = pd.Timedelta(hours=int(timeframe[1:]))
+    else:
+        expected_diff = pd.Timedelta(minutes=15)  # default
+
+    # Find unexpected gaps (excluding weekends)
+    weekend_gap = pd.Timedelta(days=2, hours=24)  # Typical weekend gap
+    unexpected_gaps = time_diffs[
+        (time_diffs > expected_diff * 1.5) &  # Greater than 1.5x expected
+        (time_diffs != weekend_gap)  # Not a weekend gap
+    ]
+
+    if len(unexpected_gaps) > 0:
+        print(f"\nFound {len(unexpected_gaps)} unexpected gaps in data")
+        print("Largest unexpected gaps:")
+        for idx in unexpected_gaps.nlargest(3).index:
+            gap_start = df_sorted['time'][idx-1] if idx > 0 else df_sorted['time'][idx]
+            print(f"Gap of {time_diffs[idx]} at {gap_start}")
+
+    # Data quality threshold checks
+    if completeness < 90:
+        print("ERROR: Data completeness below 90%")
+        return False
+
+    if len(unexpected_gaps) > total_days * 0.1:  # More than 10% of days have gaps
+        print("ERROR: Too many unexpected gaps in data")
+        return False
 
     print("\nValidation passed: Data quality checks complete")
-
+    return True
 
 
 def split_data_for_backtest(df: pd.DataFrame, split_ratio: float = 0.8) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -116,15 +216,103 @@ def split_data_for_backtest(df: pd.DataFrame, split_ratio: float = 0.8) -> Tuple
     return train, test
 
 
+def resample_m15_to_h1(df_m15: pd.DataFrame) -> pd.DataFrame:
+    """
+    Resample from M15 to H1 bars, removing NaNs.
+    """
+    df_m15["time"] = pd.to_datetime(df_m15["time"])
+    df_m15.set_index("time", inplace=True)
+    df_m15.sort_index(inplace=True)
+
+    df_h1_resampled = df_m15.resample("1H").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "tick_volume": "sum",
+    })
+    df_h1_resampled.dropna(subset=["open", "high", "low", "close"], inplace=True)
+    df_h1_resampled.reset_index(inplace=True)
+    return df_h1_resampled
+
+
+def check_h1_data_or_resample(
+    symbol: str,
+    h1_start: datetime,
+    h1_end: datetime,
+    threshold=0.9
+) -> pd.DataFrame:
+    """
+    Fetch H1 data. If completeness < threshold,
+    fallback to M15 => resample => H1.
+    """
+    df_h1 = load_data(
+        symbol=symbol,
+        timeframe="H1",
+        start_date=h1_start,
+        end_date=h1_end
+    )
+    if df_h1.empty:
+        logger.warning("No H1 data returned. Will try fallback to M15 resampling.")
+        return fallback_resample_from_m15(symbol, h1_start, h1_end)
+
+    # Validate to measure completeness
+    try:
+        validate_data_for_backtest(df_h1, timeframe="H1")
+    except ValueError as e:
+        logger.warning(f"Validation error on H1: {str(e)}. Fallback to M15.")
+        return fallback_resample_from_m15(symbol, h1_start, h1_end)
+
+    # Calculate completeness ratio
+    df_h1_min = pd.to_datetime(df_h1["time"].min())
+    df_h1_max = pd.to_datetime(df_h1["time"].max())
+    day_span = (df_h1_max - df_h1_min).days
+    expected_bars = day_span * 24 * (5/7)
+    actual_bars = len(df_h1)
+    completeness = actual_bars / (expected_bars if expected_bars > 0 else 1e-9)
+
+    if completeness < threshold:
+        logger.warning(
+            f"H1 data completeness {completeness:.1%} < {threshold:.1%}. "
+            "Falling back to M15 resampling."
+        )
+        return fallback_resample_from_m15(symbol, h1_start, h1_end)
+
+    return df_h1
+
+
+def fallback_resample_from_m15(symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+    logger.info("Attempting fallback: fetch M15 data and resample to H1.")
+    df_m15 = load_data(symbol=symbol, timeframe="M15", start_date=start, end_date=end)
+    if df_m15.empty:
+        logger.error("M15 fallback data also empty. Returning empty.")
+        return pd.DataFrame()  # still empty
+    # Resample
+    df_h1_resampled = resample_m15_to_h1(df_m15)
+    try:
+        validate_data_for_backtest(df_h1_resampled, timeframe="H1")
+    except:
+        logger.warning("Resampled H1 data is also incomplete or invalid.")
+    return df_h1_resampled
+
+
 def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance=10000.0) -> Dict:
+    """
+    Simple backtest engine that:
+    - Iterates over the DF
+    - Opens trades if signal is triggered
+    - Exits trades if conditions are met
+    - Returns final trades & balance
+    """
     if df.empty:
+        logger.warning("DataFrame empty in run_backtest. Returning no trades.")
         return {"Trades": [], "final_balance": initial_balance}
 
     trades: list["SR_Bounce_Strategy.Trade"] = []
     balance = initial_balance
     active_trade: Optional["SR_Bounce_Strategy.Trade"] = None
 
-    logging.debug("Starting backtest run...")
+    logger.debug("Starting backtest run...")
 
     for i in range(len(df)):
         current_segment = df.iloc[: i + 1]
@@ -137,7 +325,7 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
             if new_trade:
                 active_trade = new_trade
                 trades.append(active_trade)
-                logging.debug(f"New trade opened: {new_trade.type} at {new_trade.entry_price}")
+                logger.debug(f"New trade opened: {new_trade.type} at {new_trade.entry_price}")
         else:
             should_close, fill_price, pnl = strategy.exit_trade(current_segment, active_trade)
             if should_close:
@@ -147,9 +335,10 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
                 active_trade.close_time = last_bar["time"]
                 active_trade.close_price = fill_price
                 active_trade.pnl = pnl
-                logging.debug(f"Trade closed: PnL={pnl:.2f}")
+                logger.debug(f"Trade closed: PnL={pnl:.2f}")
                 active_trade = None
 
+    # If a trade is still open at the end, force close
     if active_trade:
         last_bar = df.iloc[-1]
         last_close = float(last_bar["close"])
@@ -163,7 +352,7 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
         active_trade.close_time = last_bar["time"]
         active_trade.close_price = last_close
         active_trade.pnl = pnl
-        logging.debug(f"Final trade closed: PnL={pnl:.2f}")
+        logger.debug(f"Final trade forcibly closed: PnL={pnl:.2f}")
         active_trade = None
 
     return {
@@ -171,170 +360,56 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
         "final_balance": balance
     }
 
-def fetch_and_resample_m15_to_h1():
-    """
-    Fetch 2 years of M15 data, resample to H1 bars, and validate completeness.
-    """
-    # 1) Load M15 data (2 years)
-    days_needed = 730  # ~2 years
-    symbol = "EURUSD"
-    timeframe = "M15"
-
-    print(f"\n--- Fetching {days_needed} days of {symbol} {timeframe} data ---")
-    df_m15 = load_data(symbol=symbol, timeframe=timeframe, days=days_needed)
-    if df_m15.empty:
-        print("No M15 data returned. Exiting fetch_and_resample_m15_to_h1.")
-        return
-
-    # First validate the M15 data
-    print(f"Fetched {len(df_m15)} M15 bars. Validating original M15 dataset...")
-    validate_data_for_backtest(df_m15, timeframe="M15")  # <--- Validate M15 first
-
-    # 2) Convert 'time' column to a proper DateTime index for resampling
-    df_m15["time"] = pd.to_datetime(df_m15["time"])
-    df_m15.set_index("time", inplace=True)
-    df_m15.sort_index(inplace=True)  # Ensure ascending time order
-
-    # 3) Resample from M15 to H1
-    print("\n--- Resampling M15 -> H1 ---")
-    df_h1_resampled = df_m15.resample("1H").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "tick_volume": "sum",  # sum volumes over each hour
-    })
-
-    # 4) Remove rows that are all NaN (e.g., partial or missing intervals)
-    df_h1_resampled.dropna(subset=["open", "high", "low", "close"], inplace=True)
-
-    # 5) Restore the 'time' column as normal
-    df_h1_resampled.reset_index(inplace=True)
-
-    print(f"Resampled dataset shape: {df_h1_resampled.shape}.")
-    print(f"Date range: {df_h1_resampled['time'].min()} -> {df_h1_resampled['time'].max()}")
-
-    # 6) Validate the new H1 DataFrame
-    print("\n--- Validating Resampled H1 Data ---")
-    validate_data_for_backtest(df_h1_resampled, timeframe="H1")  # <--- Now we can validate H1
-
-    # (Optional) Save the resampled H1 data to CSV
-    output_file = "EURUSD_H1_resampled.csv"
-    df_h1_resampled.to_csv(output_file, index=False)
-    print(f"\nSaved resampled H1 data to CSV: {output_file}")
-
-
-
-def check_training_bounces(strategy: SR_Bounce_Strategy, df_train: pd.DataFrame):
-    print("\n--- Checking for bounces in the TRAINING SET ---")
-    bounce_count = 0
-    bounce_details = []
-
-    for i in range(len(df_train)):
-        current_segment = df_train.iloc[: i + 1]
-        sig = strategy.generate_signals(current_segment)
-        if sig["type"] != "NONE":
-            bar_time = current_segment.iloc[-1]["time"]
-            print(f"Bounce found at index={i}, time={bar_time}, signal={sig}")
-            bounce_count += 1
-            bounce_details.append({
-                'time': bar_time,
-                'type': sig["type"],
-                'level': sig.get('level', 0.0)
-            })
-
-    print(f"Total bounces detected in training set: {bounce_count}")
-    return bounce_details
-
-
-# [ADDED LINES] Function to Fetch 2 Years of Data (H1 & M15) -------------------
-def fetch_long_term_data():
-    """
-    Fetch 2 years of H1 and M15 data for EURUSD and validate completeness.
-    (Optional) Saves CSV for offline use.
-    """
-    # Fetch 2 years of H1 data
-    print("\n--- Fetching ~2 years of EURUSD H1 data ---")
-    df_h1_2years = load_data(symbol="EURUSD", timeframe="H1", days=730)
-    print(f"\nFetched {len(df_h1_2years)} H1 bars over ~2 years.")
-    validate_data_for_backtest(df_h1_2years)
-
-    # Fetch 2 years of M15 data
-    print("\n--- Fetching ~2 years of EURUSD M15 data ---")
-    df_m15_2years = load_data(symbol="EURUSD", timeframe="M15", days=730)
-    print(f"\nFetched {len(df_m15_2years)} M15 bars over ~2 years.")
-    validate_data_for_backtest(df_m15_2years)
-
-    # (Optional) Save to CSV
-    df_h1_2years.to_csv("EURUSD_H1_2years.csv", index=False)
-    df_m15_2years.to_csv("EURUSD_M15_2years.csv", index=False)
-    print("\nSaved H1 and M15 data to CSV files: EURUSD_H1_2years.csv, EURUSD_M15_2years.csv")
-
 
 def main():
+    print("\nStarting backtest with enhanced data validation...")
+
     symbol = "EURUSD"
     timeframe = "M15"
     days = 180
 
     print(f"\nLoading {timeframe} data for {symbol}...")
-    df = load_data(symbol, timeframe, days)
+    df = load_data(symbol, timeframe, days=days)
     if df.empty:
-        print("No data loaded. Exiting.")
+        print("ERROR: No valid data loaded. Exiting main().")
         return
 
-    validate_data_for_backtest(df)
-
-    # Split train/test
+    # If data passes validation, continue with backtest
     train_df, test_df = split_data_for_backtest(df, 0.8)
     print(f"Train/Test split: {len(train_df)} / {len(test_df)} bars")
 
-    # Get the test period dates
-    test_start = test_df['time'].min()
-    test_end = test_df['time'].max()
+    # Prepare H1 data for S/R
+    test_start = pd.to_datetime(test_df['time'].min())
+    test_end = pd.to_datetime(test_df['time'].max())
 
-    # Calculate H1 data period (exactly 45 days before test start)
-    h1_start = test_start - pd.Timedelta(days=45)
+    # e.g., 45 days prior to test start
+    h1_start = test_start - timedelta(days=45)
 
-    print(f"\nLoading H1 data for SR levels...")
-    print(f"Period: {h1_start} to {test_end}")
-
-    for attempt in range(3):
-        df_h1 = load_data(
-            symbol=symbol,
-            timeframe="H1",
-            start_date=h1_start - pd.Timedelta(days=attempt*15),  # Extend period on each retry
-            end_date=test_end
-        )
-
-        if df_h1 is not None and not df_h1.empty:
-            h1_completeness = len(df_h1) / ((test_end - h1_start).days * 24 * 5/7)
-            if h1_completeness >= 0.90:
-                break
-
-        logging.warning(f"H1 data attempt {attempt+1} completeness: {h1_completeness:.1%}")
-
+    print(f"\nFetching H1 data from {h1_start} to {test_end} ...")
+    df_h1 = check_h1_data_or_resample(symbol, h1_start, test_end, threshold=0.90)
     if df_h1.empty:
-        print("Failed to load H1 data")
+        print("Failed to load or resample H1 data. Exiting.")
         return
+    validate_data_for_backtest(df_h1, "H1")
 
-    validate_data_for_backtest(df_h1)
+    # Instantiate strategy with default or config
+    strategy = SR_Bounce_Strategy(config_file=None)  # or specify a config_file
 
-    # Only proceed if we have enough quality data
-    h1_completeness = len(df_h1) / ((test_end - h1_start).days * 24 * 5/7)
-    if h1_completeness < 0.9:  # Require at least 90% data completeness
-        print(f"Insufficient H1 data completeness: {h1_completeness:.1%}")
-        return
+    # Use 2 weeks of data for weekly S/R
+    strategy.update_weekly_levels(df_h1, weeks=2, weekly_buffer=0.00075)
 
-    strategy = SR_Bounce_Strategy()
+    # Example: check training bounces (optional)
+    print("\n--- Checking for bounces in the TRAINING SET ---")
+    bounce_count = 0
+    for i in range(len(train_df)):
+        current_segment = train_df.iloc[: i + 1]
+        sig = strategy.generate_signals(current_segment)
+        if sig["type"] != "NONE":
+            print(f"Bounce found at index={i}, time={current_segment.iloc[-1]['time']}, signal={sig}")
+            bounce_count += 1
+    print(f"Total bounces detected in training set: {bounce_count}")
 
-    if hasattr(strategy, "update_weekly_levels"):
-        strategy.update_weekly_levels(df_h1, weeks=2, weekly_buffer=0.00075)
-        print("Weekly levels found:", strategy.valid_levels)
-        print(f"Number of valid levels found: {len(strategy.valid_levels)}")
-        print(f"Valid levels: {strategy.valid_levels}")
-
-    bounce_details = check_training_bounces(strategy, train_df)
-
+    # Run backtest on test_df
     backtest_result = run_backtest(strategy, test_df, initial_balance=10000.0)
     trades = backtest_result["Trades"]
     final_balance = backtest_result["final_balance"]
@@ -349,33 +424,27 @@ def main():
     print(f"Total PnL: ${stats['total_pnl']:.2f}")
     print(f"Final Balance: ${final_balance:.2f}")
 
-    print("\n--- MONTE CARLO (1000 shuffles) ---")
-
+    # Write report
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = "results"
     os.makedirs(output_dir, exist_ok=True)
     report_file = os.path.join(output_dir, f"BACKTEST_REPORT_{symbol}_{now_str}.md")
 
-    monthly_data = {}
-    monthly_levels = []
-    weekly_levels = []
-
     with ReportWriter(report_file) as writer:
         writer.write_data_overview(test_df)
         writer.write_trades_section(trades)
         writer.write_stats_section(stats, final_balance)
-        writer.write_monthly_breakdown(monthly_data)
-        writer.write_sr_levels(monthly_levels, weekly_levels)
+        writer.write_monthly_breakdown({})
+        writer.write_sr_levels([], [])
 
     print(f"\nDetailed report written to: {report_file}")
+    print("\n--- Signal Generation Stats ---")
+    print(f"Potential signals filtered due to volume: {strategy.signal_generator.signal_stats['volume_filtered']}")
+    print(f"First bounces recorded: {strategy.signal_generator.signal_stats['first_bounce_recorded']}")
+    print(f"Second bounces filtered (low volume): {strategy.signal_generator.signal_stats['second_bounce_low_volume']}")
+    print(f"Signals that missed by tolerance: {strategy.signal_generator.signal_stats['tolerance_misses']}")
+    print(f"Signals generated: {strategy.signal_generator.signal_stats['signals_generated']}")
 
 
 if __name__ == "__main__":
-    # Normal backtest run (unchanged):
     main()
-
-    # Optional: M15 -> H1 resample
-    fetch_and_resample_m15_to_h1()
-
-    # [ADDED LINES] Uncomment below if you want to fetch ~2 years of data:
-    fetch_long_term_data()

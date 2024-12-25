@@ -1,120 +1,101 @@
 import logging
 from typing import Any, Dict, Tuple
 import pandas as pd
-from src.strategy.price_analysis import detect_price_hovering
 
-
-# trade_manager.py
-from typing import Any, Dict, Tuple
-import pandas as pd
-import logging
+def get_trade_manager_logger(name="TradeManager"):
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    return logger
 
 class TradeManager:
     def __init__(self, risk_reward: float):
         self.risk_reward = risk_reward
-        self.logger = logging.getLogger("TradeManager")
-        self.logger.setLevel(logging.DEBUG)
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-            handler.setFormatter(formatter)
-            self.logger.addHandler(handler)
+        self.logger = get_trade_manager_logger()
 
     def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
         """Calculate stop loss based on signal type and recent price action."""
-        try:
-            last_bar = df_segment.iloc[-1]
-            low = float(last_bar['low'])
-            high = float(last_bar['high'])
+        if df_segment.empty:
+            return 0.0
 
-            # Default pip buffer (8 pips)
-            pip_buffer = 0.0008
+        last_bar = df_segment.iloc[-1]
+        close_price = float(last_bar['close'])
+        low = float(last_bar['low'])
+        high = float(last_bar['high'])
 
-            # Calculate stop loss based on signal type
-            if signal["type"] == "BUY":
-                # For buys, stop goes below recent low
-                stop_loss = low - pip_buffer
-                self.logger.debug(f"Buy signal stop loss: {stop_loss:.5f}")
-            else:  # SELL
-                # For sells, stop goes above recent high
-                stop_loss = high + pip_buffer
-                self.logger.debug(f"Sell signal stop loss: {stop_loss:.5f}")
+        pip_buffer = 0.0008
 
-            return stop_loss
+        if signal["type"] == "BUY":
+            stop_loss = low - pip_buffer
+            self.logger.debug(f"Buy signal => SL set below last low: {stop_loss:.5f}")
+        else:  # SELL
+            stop_loss = high + pip_buffer
+            self.logger.debug(f"Sell signal => SL set above last high: {stop_loss:.5f}")
 
-        except Exception as e:
-            self.logger.error(f"Stop loss calculation error: {str(e)}")
-            # Return a default stop loss in case of error
-            return last_bar['close'] * 0.99 if signal["type"] == "BUY" else last_bar['close'] * 1.01
+        return stop_loss
 
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
-        """Calculate position size based on risk management rules."""
-        try:
-            # Validate inputs
-            if account_balance <= 0:
-                self.logger.error(f"Invalid account balance: {account_balance}")
-                return 0.01
-
-            if stop_distance <= 0:
-                self.logger.error(f"Invalid stop distance: {stop_distance}")
-                return 0.01
-
-            # Risk calculation (1% risk per trade)
-            risk_amount = account_balance * 0.01
-
-            # Convert stop distance to pips
-            stop_pips = stop_distance * 10000.0
-
-            # Calculate pip value (EURUSD standard lot = $10 per pip)
-            pip_value = 10.0
-
-            # Calculate position size in lots
-            position_size = risk_amount / (stop_pips * pip_value)
-
-            # Round to 2 decimal places and ensure minimum size
-            position_size = max(round(position_size, 2), 0.01)
-
-            self.logger.info(f"Position size calculated: {position_size} lots")
-            self.logger.debug(f"Details: Balance=${account_balance}, Risk=${risk_amount}, Stop={stop_pips}pips")
-
-            return position_size
-
-        except Exception as e:
-            self.logger.error(f"Position size calculation error: {str(e)}")
+        """
+        Basic 1% risk model:
+        - risk_amount = 1% of balance
+        - position_size = risk_amount / (stop_pips * pip_value)
+        """
+        if account_balance <= 0:
+            self.logger.error(f"Invalid account_balance: {account_balance}")
+            return 0.01
+        if stop_distance <= 0:
+            self.logger.error(f"Invalid stop_distance: {stop_distance}")
             return 0.01
 
+        risk_amount = account_balance * 0.01
+        stop_pips = stop_distance * 10000.0
+        pip_value = 10.0  # For EURUSD in 1 standard lot
+
+        position_size = risk_amount / (stop_pips * pip_value)
+        position_size = round(position_size, 2)
+
+        if position_size < 0.01:
+            position_size = 0.01  # ensure min
+
+        self.logger.info(f"Position size calculated: {position_size} lots (Balance={account_balance}, Stop={stop_distance:.5f})")
+        return position_size
+
     def calculate_take_profit(self, entry_price: float, sl: float) -> float:
-        """Calculate take profit based on risk/reward ratio."""
+        """
+        If risk_reward=2.0, the distance from entry to SL is multiplied by 2
+        for the TP distance.
+        """
         dist = abs(entry_price - sl)
-        if entry_price > sl:  # Long position
+        if entry_price > sl:
             return entry_price + (dist * self.risk_reward)
-        else:  # Short position
+        else:
             return entry_price - (dist * self.risk_reward)
 
-    def check_exit_conditions(
-        self,
-        df_segment: pd.DataFrame,
-        position: Dict[str, Any]
-    ) -> Tuple[bool, str]:
-        """Check if any exit conditions are met."""
-        try:
-            last_bar = df_segment.iloc[-1]
-            current_price = float(last_bar["close"])
+    def check_exit_conditions(self, df_segment: pd.DataFrame, position: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Check if SL or TP is touched by the last bar's close.
+        Return (should_close, reason).
+        """
+        if df_segment.empty:
+            return False, "No data"
 
-            # Basic stop loss & take profit checks
-            if position["type"] == "BUY":
-                if current_price <= position["stop_loss"]:
-                    return True, "Stop loss hit"
-                if current_price >= position["take_profit"]:
-                    return True, "Take profit hit"
-            else:  # SELL position
-                if current_price >= position["stop_loss"]:
-                    return True, "Stop loss hit"
-                if current_price <= position["take_profit"]:
-                    return True, "Take profit hit"
+        last_bar = df_segment.iloc[-1]
+        current_price = float(last_bar["close"])
+        pos_type = position.get("type", "BUY")
 
-            return False, "No exit condition met"
+        if pos_type == "BUY":
+            if current_price <= position["stop_loss"]:
+                return True, "Stop loss hit"
+            if current_price >= position["take_profit"]:
+                return True, "Take profit hit"
+        else:  # SELL
+            if current_price >= position["stop_loss"]:
+                return True, "Stop loss hit"
+            if current_price <= position["take_profit"]:
+                return True, "Take profit hit"
 
-        except Exception as e:
-            self.logger.error(f"Exit condition check error: {str(e)}")
-            return False, "Error checking exit conditions"
+        return False, "No exit condition met"
