@@ -9,67 +9,6 @@ from src.strategy.signal_generator import SignalGenerator
 from src.strategy.trade_manager import TradeManager
 from typing import List
 
-def identify_sr_weekly(
-    df_h1: pd.DataFrame,
-    weeks: int = 2,
-    chunk_size: int = 24,
-    weekly_buffer: float = 0.0003
-) -> List[float]:
-    """
-    Gathers multiple S/R lines from H1 data spanning the last `weeks` weeks.
-    1) Filter to the last X weeks of data.
-    2) Chunk into windows of `chunk_size` bars (e.g. 24 bars ~ 1 day).
-    3) Record max/min from each chunk as potential S/R.
-    4) (Optional) merge nearby lines within `pip_threshold`.
-    5) Return sorted list of lines (lowest -> highest).
-    """
-
-    if df_h1.empty:
-        return []
-
-    # 1) Filter to last `weeks` weeks
-    last_time = pd.to_datetime(df_h1["time"].max())
-    cutoff_time = last_time - pd.Timedelta(days=weeks * 7)
-    recent_df = df_h1[df_h1["time"] >= cutoff_time]
-    if recent_df.empty:
-        return []
-
-    # 2) Gather potential levels by chunking
-    potential_levels = []
-    end_index = len(recent_df) - chunk_size
-    if end_index < 0:
-        # If we don't even have chunk_size bars, just take one max/min
-        hi = recent_df["high"].max()
-        lo = recent_df["low"].min()
-        return [lo, hi]
-
-    for i in range(end_index + 1):
-        window = recent_df.iloc[i : i + chunk_size]
-        hi = window["high"].max()
-        lo = window["low"].min()
-        potential_levels.append(hi)
-        potential_levels.append(lo)
-
-    # 3) Remove duplicates & sort
-    potential_levels = sorted(set(potential_levels))
-
-    # 4) (Optional) Merge lines that are very close (within `pip_threshold`)
-    merged_levels = []
-    for lvl in potential_levels:
-        if not merged_levels:
-            merged_levels.append(lvl)
-            continue
-        prev = merged_levels[-1]
-        # If they're within pip_threshold, replace the last with midpoint
-        if abs(lvl - prev) <= weekly_buffer:
-            midpoint = (lvl + prev) / 2.0
-            merged_levels[-1] = midpoint
-        else:
-            merged_levels.append(lvl)
-
-    return merged_levels
-
-
 class SR_Bounce_Strategy:
 
     def __init__(
@@ -106,6 +45,70 @@ class SR_Bounce_Strategy:
         # 6) Initialize TradeManager
         self.trade_manager = TradeManager(risk_reward=1.2)
 
+    def identify_sr_weekly(self, df_h1: pd.DataFrame, weeks: int = 12, chunk_size: int = 24, weekly_buffer: float = 0.0003) -> List[float]:
+        """Identify significant support and resistance levels from H1 data."""
+        try:
+            if df_h1.empty:
+                self.logger.error("Empty dataframe passed to identify_sr_weekly")
+                return []
+
+            # Filter to last `weeks` weeks
+            last_time = pd.to_datetime(df_h1["time"].max())
+            cutoff_time = last_time - pd.Timedelta(days=weeks * 7)
+            recent_df = df_h1[df_h1["time"] >= cutoff_time].copy()
+
+            self.logger.info(f"Analyzing data from {recent_df['time'].min()} to {recent_df['time'].max()}")
+
+            if recent_df.empty:
+                self.logger.error("No data after filtering for recent weeks")
+                return []
+
+            # Calculate average volume for significance test
+            avg_volume = recent_df['tick_volume'].mean()
+            volume_threshold = avg_volume * 1.5
+
+            # Gather and validate potential levels
+            potential_levels = []
+            for i in range(0, len(recent_df), chunk_size):
+                window = recent_df.iloc[i:i + chunk_size]
+                if len(window) < chunk_size/2:  # Skip small windows
+                    continue
+
+                # Find significant highs and lows
+                high = float(window['high'].max())
+                low = float(window['low'].min())
+
+                # Check volume at these levels
+                high_volume = window.loc[window['high'] == high, 'tick_volume'].iloc[0]
+                low_volume = window.loc[window['low'] == low, 'tick_volume'].iloc[0]
+
+                if high_volume > volume_threshold:
+                    potential_levels.append(high)
+                    self.logger.debug(f"High level found at {high:.5f} with volume {high_volume}")
+
+                if low_volume > volume_threshold:
+                    potential_levels.append(low)
+                    self.logger.debug(f"Low level found at {low:.5f} with volume {low_volume}")
+
+            # Remove duplicates and sort
+            potential_levels = sorted(set(potential_levels))
+
+            # Merge nearby levels
+            merged_levels = []
+            for level in potential_levels:
+                if not merged_levels or abs(level - merged_levels[-1]) > weekly_buffer:
+                    merged_levels.append(level)
+                else:
+                    # Update existing level with average if too close
+                    merged_levels[-1] = (merged_levels[-1] + level) / 2
+
+            self.logger.info(f"Identified {len(merged_levels)} valid S/R levels")
+            return merged_levels
+
+        except Exception as e:
+            self.logger.error(f"Error in identify_sr_weekly: {str(e)}")
+            return []
+
     def _load_config(self, config_file: str):
         try:
             with open(config_file, "r", encoding="utf-8") as f:
@@ -127,22 +130,23 @@ class SR_Bounce_Strategy:
 
 
     def update_weekly_levels(self, df_h1, weeks: int = 2, weekly_buffer: float = 0.00075):
-        w_levels = identify_sr_weekly(df_h1, weeks=weeks, weekly_buffer=weekly_buffer)
-        """
-        Identify weekly S/R from the last 'weeks' of H1 data, apply a small buffer,
-        and merge into self.valid_levels.
-        """
-        w_levels = identify_sr_weekly(df_h1, weeks=weeks, weekly_buffer=weekly_buffer)
-        # w_levels is like [weekly_support, weekly_resistance]
+        """Update the strategy's valid levels using weekly S/R levels."""
+        try:
+            w_levels = self.identify_sr_weekly(df_h1, weeks=weeks, weekly_buffer=weekly_buffer)
 
-        if not w_levels:
-            self.logger.warning("No weekly levels found. (Empty data?)")
-            return
+            if not w_levels:
+                self.logger.warning("No weekly levels found")
+                return
 
-        # Merge them into self.valid_levels. For simplicity, just extend and sort:
-        self.valid_levels.extend(w_levels)
-        self.valid_levels = sorted(set(self.valid_levels))  # remove duplicates, sort
-        self.logger.info(f"Weekly levels merged: {w_levels}  Now total: {len(self.valid_levels)}")
+            # Update valid_levels
+            self.valid_levels = w_levels
+            self.logger.info(f"Updated valid levels. Total levels: {len(self.valid_levels)}")
+
+            # Update signal generator's levels
+            self.signal_generator.valid_levels = self.valid_levels
+
+        except Exception as e:
+            self.logger.error(f"Error updating weekly levels: {str(e)}")
 
     def generate_signals(self, df_segment):
         return self.signal_generator.generate_signal(df_segment)
@@ -166,32 +170,32 @@ class SR_Bounce_Strategy:
         return self.trade_manager.check_exit_conditions(df_segment, position)
 
     def open_trade(strategy: "SR_Bounce_Strategy", current_segment, balance: float, i: int):
+        """Open a new trade if conditions are met."""
         signal = strategy.generate_signals(current_segment)
         if signal["type"] == "NONE":
             return None
 
-        # Possibly validate volume, session, momentum, etc.
+        # Validate volume, session, momentum, etc.
         last_bar = current_segment.iloc[-1]
         if last_bar["tick_volume"] < strategy.params["min_volume_threshold"]:
             return None  # no trade if volume is too low
 
-        # 1) Define an entry price (e.g., last bar's close).
-        #    If you prefer using the bar's open or the S/R level, adjust here.
+        # 1) Define entry price (using last bar's close)
         entry_price = float(last_bar["close"])
 
-        # 2) Calculate stop loss using your TradeManager
+        # 2) Calculate stop loss using TradeManager
         stop_loss = strategy.calculate_stop_loss(signal, current_segment)
 
-        # 3) Calculate the distance between entry & stop
+        # 3) Calculate distance between entry & stop
         stop_distance = abs(entry_price - stop_loss)
 
-        # 4) Calculate the position size
+        # 4) Calculate position size
         size = strategy.calculate_position_size(balance, stop_distance)
 
         # 5) Calculate take profit
         take_profit = strategy.calculate_take_profit(entry_price, stop_loss)
 
-        # 6) Now build the trade object
+        # 6) Build trade object with level information
         new_trade = SR_Bounce_Strategy.Trade(
             open_i=i,
             open_time=str(last_bar["time"]),
@@ -201,6 +205,19 @@ class SR_Bounce_Strategy:
             tp=take_profit,
             size=size
         )
+
+        # Add level information from signal
+        new_trade.level = signal.get('level', 0.0)
+        new_trade.level_type = "Support" if signal["type"] == "BUY" else "Resistance"
+        new_trade.distance_to_level = abs(entry_price - signal.get('level', entry_price))
+
+        # Add volume metrics
+        new_trade.entry_volume = float(last_bar['tick_volume'])
+        new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
+        new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(12).mean())  # Last hour for M5
+
+        strategy.logger.debug(f"Opening trade: {signal['type']} at {entry_price}, level: {new_trade.level}")
+
         return new_trade
 
 

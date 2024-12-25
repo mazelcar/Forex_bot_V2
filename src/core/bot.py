@@ -22,8 +22,7 @@ from datetime import datetime, timedelta
 
 from src.core.dashboard import Dashboard
 from src.core.mt5 import MT5Handler
-from src.strategy.support_resistance import identify_support_resistance_zones, is_bounce_candle
-from strategy.signal_generator import SignalManager
+
 
 def is_within_allowed_hours(current_hour, allowed_hours=range(12,17)):
         return current_hour in allowed_hours
@@ -43,7 +42,6 @@ class ForexBot:
         """Initialize the ForexBot with its configuration and components."""
         self.mode = mode
         self.running = False
-        self.signal_manager = SignalManager()
         self._setup_logging(debug)
 
         # Initialize components
@@ -103,13 +101,6 @@ class ForexBot:
                     end_date=end_date
                 )
 
-                if h1_data is not None and not h1_data.empty:
-                    support_levels, resistance_levels = identify_support_resistance_zones(h1_data)
-                else:
-                    support_levels = [1.05]
-                    resistance_levels = [1.06]
-                    signal_reasons.append("No H1 data or insufficient data for S/R")
-
                 # Manage open trades if any
                 if self.open_trade is not None:
                     m5_data_for_trade = self.mt5_handler.get_historical_data(
@@ -149,49 +140,7 @@ class ForexBot:
                         if ny_hour not in allowed_hours:
                             signal_reasons.append("Outside allowed trading hours")
 
-                        if ny_hour in allowed_hours:
-                            bounce_found = False
-                            for s_level in support_levels:
-                                if is_bounce_candle(last_bar, s_level, direction='support'):
-                                    signal_type = "BUY"
-                                    signal_strength = 0.8
-                                    bounce_found = True
-                                    break
-                            if not bounce_found:
-                                signal_type = "NONE"
-                                signal_strength = 0.3
-                                signal_reasons.append("No valid bounce candle or conditions not met")
 
-                            if signal_type == "BUY" and signal_strength >= 0.7:
-                                sl = s_level - 0.0004
-                                tp = last_bar['close'] + 0.0012
-                                success = self.mt5_handler.place_trade(
-                                    symbol=symbol,
-                                    order_type="BUY",
-                                    volume=0.1,
-                                    sl=sl,
-                                    tp=tp
-                                )
-                                if success:
-                                    self.open_trade = {
-                                        'type': 'BUY',
-                                        'entry_time': last_bar['time'],
-                                        'entry_price': last_bar['close'],
-                                        'sl': sl,
-                                        'tp': tp,
-                                        'position_size': 0.1
-                                    }
-                                    print("Trade placed successfully")
-                                else:
-                                    signal_reasons.append("Trade placement failed")
-                            else:
-                                if signal_type == "NONE":
-                                    signal_reasons.append("Signal too weak to place a trade")
-                                else:
-                                    signal_reasons.append("Signal strength below threshold")
-                        else:
-                            if signal_type == "NONE" and not signal_reasons:
-                                signal_reasons.append("No signal generated")
                     else:
                         signal_type = "NONE"
                         signal_strength = 0.0

@@ -132,6 +132,15 @@ def audit_mt5() -> None:
                 }
             },
             {
+                "name": "Extended H1 data validation",
+                "test": "historical_data_extended",
+                "params": {
+                    "symbol": "EURUSD",
+                    "timeframes": ["H1"],
+                    "days": [30, 45, 60]  # Test different durations
+                }
+            },
+            {
                 "name": "Symbol info validation",
                 "test": "symbol_info",
                 "params": {
@@ -212,6 +221,25 @@ def audit_mt5() -> None:
                             logger.info(f"  Time: {datetime.fromtimestamp(tick.time)}")
                         else:
                             logger.error("Market data for %s: Unavailable", symbol)
+                elif scenario['test'] == 'historical_data_extended':
+                    for days in scenario['params']['days']:
+                        end_date = datetime.now()
+                        start_date = end_date - timedelta(days=days)
+                        logger.info(f"\nTesting {days} days of H1 data:")
+                        for tf in scenario['params']['timeframes']:
+                            data = mt5_handler.get_historical_data(
+                                scenario['params']['symbol'],
+                                tf,
+                                start_date,
+                                end_date
+                            )
+                            expected_bars = (days * 24 * 5/7)  # 5/7 for weekdays
+                            completeness = len(data) / expected_bars if expected_bars > 0 else 0
+
+                            logger.info(f"Period {days} days - {tf}:")
+                            logger.info(f"Expected bars: {expected_bars:.0f}")
+                            logger.info(f"Actual bars: {len(data)}")
+                            logger.info(f"Completeness: {completeness:.1%}")
 
                 elif scenario['test'] == 'symbol_info':
                     for symbol in scenario['params']['symbols']:
