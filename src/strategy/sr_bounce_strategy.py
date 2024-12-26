@@ -2,6 +2,8 @@ import logging
 from typing import Tuple
 import json
 from typing import List, Optional, Dict, Any
+from datetime import datetime
+from src.strategy.ftmo_risk_manager import FTMORiskManager
 
 import pandas as pd
 
@@ -57,6 +59,9 @@ class SR_Bounce_Strategy:
 
         # Initialize TradeManager with same risk_reward
         self.trade_manager = TradeManager(risk_reward=self.params["risk_reward"])
+
+        self.risk_manager = FTMORiskManager()
+        self.daily_pnl = 0.0
 
 
     def _load_config(self, config_file: str):
@@ -185,14 +190,31 @@ class SR_Bounce_Strategy:
 
     def open_trade(self, current_segment, balance: float, i: int) -> Optional["SR_Bounce_Strategy.Trade"]:
         """
-        Attempt to open a new trade based on the most recent bar's signal.
+        Enhanced trade opening with FTMO safety checks
         """
+        # Get current market conditions
+        last_bar = current_segment.iloc[-1]
+        current_time = pd.to_datetime(last_bar['time'])
+        bar_range = float(last_bar['high']) - float(last_bar['low'])
+        current_spread = bar_range * 0.1
+
+        # FTMO validation
+        can_trade, reason = self.risk_manager.can_open_trade(
+            current_time=current_time,
+            spread=current_spread,
+            daily_pnl=self.daily_pnl
+        )
+
+        if not can_trade:
+            self.logger.debug(f"FTMO check failed: {reason}")
+            return None
+
+        # Continue with regular strategy
         signal = self.generate_signals(current_segment)
         if signal["type"] == "NONE":
             return None
 
         # Volume check
-        last_bar = current_segment.iloc[-1]
         if last_bar["tick_volume"] < self.params["min_volume_threshold"]:
             return None  # skip if volume too low
 
@@ -201,7 +223,6 @@ class SR_Bounce_Strategy:
 
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < 0.00001:
-            # safety check to avoid dividing by zero
             return None
 
         size = self.calculate_position_size(balance, stop_distance)
@@ -221,19 +242,23 @@ class SR_Bounce_Strategy:
         new_trade.level = signal.get('level', 0.0)
         new_trade.level_type = "Support" if signal["type"] == "BUY" else "Resistance"
         new_trade.distance_to_level = abs(entry_price - signal.get('level', entry_price))
-
         new_trade.entry_volume = float(last_bar['tick_volume'])
         new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
-        # For M15, "last hour" = last 4 bars
         new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
+
+        # Update FTMO tracking
+        self.risk_manager.update_trade_history({
+            'time': new_trade.open_time,
+            'type': new_trade.type,
+            'size': new_trade.size
+        })
 
         self.logger.debug(f"Opening trade: {signal['type']} at {entry_price:.5f}, level={new_trade.level}")
         return new_trade
 
-
     def exit_trade(self, df_segment: pd.DataFrame, trade: "SR_Bounce_Strategy.Trade") -> Tuple[bool, float, float]:
         """
-        Check if trade should be closed (SL/TP), compute PnL, return (should_close, fill_price, pnl).
+        Enhanced exit with FTMO tracking
         """
         position_dict = {
             "type": trade.type,
@@ -255,6 +280,9 @@ class SR_Bounce_Strategy:
                 pnl = (fill_price - trade.entry_price) * 10000.0 * trade.size
             else:  # SELL
                 pnl = (trade.entry_price - fill_price) * 10000.0 * trade.size
+
+            # Update daily PnL tracking for FTMO
+            self.daily_pnl += pnl
 
             return True, fill_price, pnl
 

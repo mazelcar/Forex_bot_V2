@@ -6,11 +6,20 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 import os
 
+import pytz
+
 # Import your local modules
 from src.core.mt5 import MT5Handler
 from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
+from src.strategy.data_validator import DataValidator
 from src.strategy.report_writer import ReportWriter
 from src.strategy.report_writer import analyze_trades
+
+
+
+
+
+
 
 # -------------------------------------------------------
 # Setup logging (Avoid multiple handlers)
@@ -29,6 +38,9 @@ def get_logger(name="runner", logfile="runner_debug.log"):
 logger = get_logger(name="runner", logfile="runner_debug.log")
 
 
+
+
+
 def load_market_news(news_file="config/market_news.json") -> List[Dict]:
     """Attempt to load market news JSON. If unavailable, return an empty list."""
     import json
@@ -45,102 +57,101 @@ def load_market_news(news_file="config/market_news.json") -> List[Dict]:
         return []
 
 
-def load_data(
-    symbol="EURUSD",
-    timeframe="H1",
-    days=None,
-    start_date=None,
-    end_date=None,
-    max_retries=3
-) -> pd.DataFrame:
-    """
-    Enhanced data loading with validation.
-    """
+def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_date=None, max_retries=3) -> pd.DataFrame:
     mt5 = MT5Handler(debug=True)
 
+    print(f"Attempting to load {symbol} {timeframe} data...")  # Debug print
+
     if days and not start_date and not end_date:
-        end_date = datetime.now()
+        end_date = datetime.now(pytz.UTC)
         start_date = end_date - timedelta(days=days)
+        print(f"Date range: {start_date} to {end_date}")  # Debug print
 
-    # Validate dates
-    if end_date and end_date > datetime.now():
-        print(f"ERROR: End date {end_date} is in the future")
-        return pd.DataFrame()
-
-    # Attempt multiple fetches
-    df = pd.DataFrame()
     for attempt in range(max_retries):
         try:
+            print(f"Attempt {attempt + 1} of {max_retries}")  # Debug print
             df = mt5.get_historical_data(symbol, timeframe, start_date, end_date)
-            if df is not None and not df.empty:
-                df.sort_values("time", inplace=True)
-                df.reset_index(drop=True, inplace=True)
 
-                # Validate the loaded data
-                if validate_data_for_backtest(df, timeframe):
-                    return df
-                else:
-                    logger.warning(f"Attempt {attempt+1}: Data validation failed")
-                    if start_date:
-                        start_date -= timedelta(days=5)
-            else:
-                if start_date:
-                    start_date -= timedelta(days=5)
-                logger.warning(f"Attempt {attempt+1}: Data empty or incomplete, shifting start_date back")
+            if df is None:
+                print(f"MT5 returned None on attempt {attempt + 1}")
+                continue
+
+            if df.empty:
+                print(f"MT5 returned empty DataFrame on attempt {attempt + 1}")
+                continue
+
+            print(f"Retrieved {len(df)} bars")  # Debug print
+            return df
+
         except Exception as e:
-            logger.error(f"Attempt {attempt+1} failed: {str(e)}")
+            print(f"Error on attempt {attempt + 1}: {str(e)}")
+            if start_date:
+                start_date -= timedelta(days=5)
+                print(f"Retrying with new start date: {start_date}")  # Debug print
 
-    return df  # Empty if all attempts failed
+    print("Failed to load data after all attempts")  # Debug print
+    return pd.DataFrame()
 
 
 def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool:
     """
     Enhanced data validation checking for data quality issues.
-    Returns True if data is valid, False otherwise.
     """
     if df.empty:
         print("ERROR: No data loaded.")
         return False
 
-    # Check for future dates
-    current_time = datetime.now()
-    if pd.to_datetime(df['time'].max()) > current_time:
-        print(f"ERROR: Data contains future dates! Max date: {df['time'].max()}")
+    # Basic datetime checks
+    current_time = datetime.now(pytz.UTC)
+    df_time_max = pd.to_datetime(df['time'].max())
+    if not df_time_max.tzinfo:
+        df_time_max = pytz.UTC.localize(df_time_max)
+
+    if df_time_max > current_time:
+        print(f"ERROR: Data contains future dates! Max date: {df_time_max}")
         return False
 
-    # Basic data structure validation
+    # Timezone consistency
+    df['time'] = pd.to_datetime(df['time'])
+    if not df['time'].dt.tz:
+        df['time'] = df['time'].dt.tz_localize(pytz.UTC)
+
+    # Column validation
     required_columns = ["time", "open", "high", "low", "close", "tick_volume"]
     missing_cols = [col for col in required_columns if col not in df.columns]
     if missing_cols:
         print(f"ERROR: Missing columns: {missing_cols}")
         return False
 
-    # Price integrity checks
+    # Calculate dynamic spread thresholds
     df['spread'] = df['high'] - df['low']
-    avg_spread = df['spread'].mean()
-    max_allowed_spread = avg_spread * 5  # 5x average spread threshold
+    median_spread = df['spread'].median()
+    spread_std = df['spread'].std()
 
+    # Flag spreads that are more than 5 standard deviations from median
+    df['is_extreme_spread'] = df['spread'] > (median_spread + 5 * spread_std)
+
+    # Only invalid if not extreme spread and OHLC invalid
     invalid_prices = df[
-        (df['high'] < df['low']) |  # Invalid OHLC
-        (df['close'] > df['high']) |
-        (df['close'] < df['low']) |
-        (df['open'] > df['high']) |
-        (df['open'] < df['low']) |
-        (df['spread'] > max_allowed_spread)  # Abnormal spreads
+        ~df['is_extreme_spread'] &  # Not an extreme spread event
+        ((df['high'] < df['low']) |
+         (df['close'] > df['high']) |
+         (df['close'] < df['low']) |
+         (df['open'] > df['high']) |
+         (df['open'] < df['low']))
     ]
 
     if not invalid_prices.empty:
-        print("\nERROR: Found invalid price data:")
+        print("\nTruly invalid price data:")
         print(invalid_prices[['time', 'open', 'high', 'low', 'close', 'spread']].head())
         return False
 
-    # Check for zero prices
+    # Zero price check
     if (df[['open', 'high', 'low', 'close']] == 0).any().any():
         print("ERROR: Found zero prices in data")
         return False
 
     # Date analysis
-    df['time'] = pd.to_datetime(df['time'])
     date_min = df["time"].min()
     date_max = df["time"].max()
     date_range = date_max - date_min
@@ -151,15 +162,12 @@ def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool
     print(f"End: {date_max}")
     print(f"Total days: {total_days}")
 
-    # Expected bars calculation
-    if timeframe == "M15":
-        bars_per_day = 4 * 24
-    elif timeframe == "M5":
-        bars_per_day = 12 * 24
-    elif timeframe == "H1":
-        bars_per_day = 24
-    else:
-        bars_per_day = 24
+    # Bar calculation
+    bars_per_day = {
+        "M15": 4 * 24,
+        "M5": 12 * 24,
+        "H1": 24
+    }.get(timeframe, 24)
 
     expected_bars = total_days * bars_per_day * (5/7)  # Excluding weekends
     actual_bars = len(df)
@@ -170,38 +178,44 @@ def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool
     print(f"Actual bars: {actual_bars}")
     print(f"Data completeness: {completeness:.1f}%")
 
-    # Gap detection
-    df_sorted = df.sort_values("time")
+    # Gap analysis
+    df_sorted = df.sort_values("time").reset_index(drop=True)
     time_diffs = df_sorted["time"].diff()
 
-    # Expected time difference based on timeframe
-    if timeframe.startswith("M"):
-        expected_diff = pd.Timedelta(minutes=int(timeframe[1:]))
-    elif timeframe.startswith("H"):
-        expected_diff = pd.Timedelta(hours=int(timeframe[1:]))
-    else:
-        expected_diff = pd.Timedelta(minutes=15)  # default
+    expected_diff = pd.Timedelta(**{
+        'minutes': int(timeframe[1:]) if timeframe.startswith('M') else 15,
+        'hours': int(timeframe[1:]) if timeframe.startswith('H') else 0
+    })
 
-    # Find unexpected gaps (excluding weekends)
-    weekend_gap = pd.Timedelta(days=2, hours=24)  # Typical weekend gap
-    unexpected_gaps = time_diffs[
-        (time_diffs > expected_diff * 1.5) &  # Greater than 1.5x expected
-        (time_diffs != weekend_gap)  # Not a weekend gap
+    weekend_gaps = time_diffs[
+        (df_sorted['time'].dt.dayofweek == 0) &
+        (time_diffs > pd.Timedelta(days=1))
     ]
 
-    if len(unexpected_gaps) > 0:
-        print(f"\nFound {len(unexpected_gaps)} unexpected gaps in data")
-        print("Largest unexpected gaps:")
-        for idx in unexpected_gaps.nlargest(3).index:
-            gap_start = df_sorted['time'][idx-1] if idx > 0 else df_sorted['time'][idx]
-            print(f"Gap of {time_diffs[idx]} at {gap_start}")
+    unexpected_gaps = time_diffs[
+        (time_diffs > expected_diff * 1.5) &
+        ~((df_sorted['time'].dt.dayofweek == 0) &
+          (time_diffs > pd.Timedelta(days=1)))
+    ]
 
-    # Data quality threshold checks
+    print(f"\nGap Analysis:")
+    print(f"Weekend gaps detected: {len(weekend_gaps)}")
+    print(f"Unexpected gaps: {len(unexpected_gaps)}")
+
+    if len(unexpected_gaps) > 0:
+        print("\nLargest unexpected gaps:")
+        largest_gaps = unexpected_gaps.nlargest(3)
+        for idx in largest_gaps.index:
+            if idx > 0:
+                gap_start = df_sorted.loc[idx-1, 'time']
+                print(f"Gap of {time_diffs[idx]} at {gap_start}")
+
+    # Quality checks
     if completeness < 90:
         print("ERROR: Data completeness below 90%")
         return False
 
-    if len(unexpected_gaps) > total_days * 0.1:  # More than 10% of days have gaps
+    if len(unexpected_gaps) > total_days * 0.1:
         print("ERROR: Too many unexpected gaps in data")
         return False
 
@@ -224,13 +238,13 @@ def resample_m15_to_h1(df_m15: pd.DataFrame) -> pd.DataFrame:
     df_m15.set_index("time", inplace=True)
     df_m15.sort_index(inplace=True)
 
-    df_h1_resampled = df_m15.resample("1H").agg({
-        "open": "first",
-        "high": "max",
-        "low": "min",
-        "close": "last",
-        "tick_volume": "sum",
-    })
+    df_h1_resampled = df_m15.resample("1h").agg({  # Changed from "1H" to "1h"
+    "open": "first",
+    "high": "max",
+    "low": "min",
+    "close": "last",
+    "tick_volume": "sum",
+})
     df_h1_resampled.dropna(subset=["open", "high", "low", "close"], inplace=True)
     df_h1_resampled.reset_index(inplace=True)
     return df_h1_resampled
@@ -438,12 +452,21 @@ def main():
         writer.write_sr_levels([], [])
 
     print(f"\nDetailed report written to: {report_file}")
+    # Signal Generation Stats printing
     print("\n--- Signal Generation Stats ---")
     print(f"Potential signals filtered due to volume: {strategy.signal_generator.signal_stats['volume_filtered']}")
     print(f"First bounces recorded: {strategy.signal_generator.signal_stats['first_bounce_recorded']}")
     print(f"Second bounces filtered (low volume): {strategy.signal_generator.signal_stats['second_bounce_low_volume']}")
     print(f"Signals that missed by tolerance: {strategy.signal_generator.signal_stats['tolerance_misses']}")
     print(f"Signals generated: {strategy.signal_generator.signal_stats['signals_generated']}")
+
+    # Data Quality Stats
+    validator = DataValidator()
+    df, quality_metrics = validator.validate_and_clean_data(df, timeframe)
+    if quality_metrics.get('true_gaps_detected', 0) > 0:
+        print(f"WARNING: Found {quality_metrics['true_gaps_detected']} unexpected gaps during trading hours")
+    print(f"Weekend gaps: {quality_metrics.get('weekend_gaps', 0)}")
+    print(f"Session gaps: {quality_metrics.get('session_gaps', 0)}")
 
 
 if __name__ == "__main__":
