@@ -6,8 +6,6 @@ from datetime import datetime
 import pandas as pd
 
 from src.strategy.signal_generator import SignalGenerator
-from src.strategy.trade_manager import TradeManager
-
 
 
 
@@ -31,12 +29,12 @@ class SR_Bounce_Strategy:
         logger: logging.Logger = None,
         news_file: str = "config/market_news.json"
     ):
-        # Default params
+        # Default params - now including risk_reward
         self.params = {
             "min_touches": 8,
             "min_volume_threshold": 1500,
             "margin_pips": 0.0030,
-            "risk_reward": 2.0,          # Use 2.0 consistently
+            "risk_reward": 2.0,          # Moved from TradeManager
             "lookforward_minutes": 30,
         }
 
@@ -57,9 +55,6 @@ class SR_Bounce_Strategy:
             params=self.params,
             log_file="results/signals_debug.log"
         )
-
-        # Initialize TradeManager with same risk_reward
-        self.trade_manager = TradeManager(risk_reward=self.params["risk_reward"])
 
         self.daily_pnl = 0.0
 
@@ -217,18 +212,88 @@ class SR_Bounce_Strategy:
         return self.signal_generator.validate_signal(signal, df_segment)
 
 
-    # --- Trade Management Wrappers ---
-    def calculate_stop_loss(self, signal, df_segment) -> float:
-        return self.trade_manager.calculate_stop_loss(signal, df_segment)
+    def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
+        """Calculate stop loss based on signal type and recent price action."""
+        if df_segment.empty:
+            return 0.0
+
+        last_bar = df_segment.iloc[-1]
+        close_price = float(last_bar['close'])
+        low = float(last_bar['low'])
+        high = float(last_bar['high'])
+
+        pip_buffer = 0.0008
+
+        if signal["type"] == "BUY":
+            stop_loss = low - pip_buffer
+            self.logger.debug(f"Buy signal => SL set below last low: {stop_loss:.5f}")
+        else:  # SELL
+            stop_loss = high + pip_buffer
+            self.logger.debug(f"Sell signal => SL set above last high: {stop_loss:.5f}")
+
+        return stop_loss
 
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
-        return self.trade_manager.calculate_position_size(account_balance, stop_distance)
+        """
+        Basic 1% risk model:
+        - risk_amount = 1% of balance
+        - position_size = risk_amount / (stop_pips * pip_value)
+        """
+        if account_balance <= 0:
+            self.logger.error(f"Invalid account_balance: {account_balance}")
+            return 0.01
+        if stop_distance <= 0:
+            self.logger.error(f"Invalid stop_distance: {stop_distance}")
+            return 0.01
+
+        risk_amount = account_balance * 0.01
+        stop_pips = stop_distance * 10000.0
+        pip_value = 10.0  # For EURUSD in 1 standard lot
+
+        position_size = risk_amount / (stop_pips * pip_value)
+        position_size = round(position_size, 2)
+
+        if position_size < 0.01:
+            position_size = 0.01  # ensure min
+
+        self.logger.info(f"Position size calculated: {position_size} lots (Balance={account_balance}, Stop={stop_distance:.5f})")
+        return position_size
 
     def calculate_take_profit(self, entry_price: float, sl: float) -> float:
-        return self.trade_manager.calculate_take_profit(entry_price, sl)
+        """
+        If risk_reward=2.0, the distance from entry to SL is multiplied by 2
+        for the TP distance.
+        """
+        dist = abs(entry_price - sl)
+        if entry_price > sl:
+            return entry_price + (dist * self.params["risk_reward"])
+        else:
+            return entry_price - (dist * self.params["risk_reward"])
 
-    def check_exit(self, df_segment, position):
-        return self.trade_manager.check_exit_conditions(df_segment, position)
+    def check_exit_conditions(self, df_segment: pd.DataFrame, position: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Check if SL or TP is touched by the last bar's close.
+        Return (should_close, reason).
+        """
+        if df_segment.empty:
+            return False, "No data"
+
+        last_bar = df_segment.iloc[-1]
+        current_price = float(last_bar["close"])
+        pos_type = position.get("type", "BUY")
+
+        if pos_type == "BUY":
+            if current_price <= position["stop_loss"]:
+                return True, "Stop loss hit"
+            if current_price >= position["take_profit"]:
+                return True, "Take profit hit"
+        else:  # SELL
+            if current_price >= position["stop_loss"]:
+                return True, "Stop loss hit"
+            if current_price <= position["take_profit"]:
+                return True, "Take profit hit"
+
+        return False, "No exit condition met"
 
 
     def open_trade(self, current_segment, balance: float, i: int) -> Optional["SR_Bounce_Strategy.Trade"]:
@@ -307,7 +372,7 @@ class SR_Bounce_Strategy:
             "stop_loss": trade.sl,
             "take_profit": trade.tp
         }
-        should_close, reason = self.trade_manager.check_exit_conditions(df_segment, position_dict)
+        should_close, reason = self.check_exit_conditions(df_segment, position_dict)
 
         if should_close:
             last_bar = df_segment.iloc[-1]
