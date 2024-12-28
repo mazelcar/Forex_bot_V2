@@ -3,12 +3,13 @@ from typing import Tuple
 import json
 from typing import List, Optional, Dict, Any
 from datetime import datetime
-from src.strategy.ftmo_risk_manager import FTMORiskManager
-
 import pandas as pd
 
 from src.strategy.signal_generator import SignalGenerator
 from src.strategy.trade_manager import TradeManager
+
+
+
 
 
 def get_strategy_logger(name="SR_Bounce_Strategy"):
@@ -60,8 +61,25 @@ class SR_Bounce_Strategy:
         # Initialize TradeManager with same risk_reward
         self.trade_manager = TradeManager(risk_reward=self.params["risk_reward"])
 
-        self.risk_manager = FTMORiskManager()
         self.daily_pnl = 0.0
+
+        # FTMO Parameters
+        self.initial_balance = 100000.0
+        self.current_balance = self.initial_balance
+        self.daily_high_balance = self.initial_balance
+        self.daily_trades = []
+
+        # FTMO Limits
+        self.daily_drawdown_limit = 0.05  # 5% daily
+        self.max_drawdown_limit = 0.10    # 10% total
+        self.profit_target = 0.10         # 10% profit target
+
+        # Trading rules
+        self.max_positions = 3
+        self.max_daily_trades = 8
+        self.max_spread = 0.002  # Maximum 3 pip spread
+
+        self.last_reset = datetime.now().date()
 
 
     def _load_config(self, config_file: str):
@@ -71,6 +89,31 @@ class SR_Bounce_Strategy:
             self.params.update(user_cfg)
         except Exception as e:
             print(f"[WARNING] Unable to load {config_file}: {e}")
+
+    def _validate_ftmo_rules(self, current_time: datetime, spread: float) -> Tuple[bool, str]:
+        """Internal FTMO validation logic"""
+        trade_date = pd.to_datetime(current_time).date()
+
+        # Reset counters if needed
+        if trade_date != self.last_reset:
+            self.daily_trades = []
+            self.last_reset = trade_date
+            self.daily_pnl = 0.0
+
+        # Check daily trade count
+        daily_trades_count = len([t for t in self.daily_trades
+                                if pd.to_datetime(t['time']).date() == trade_date])
+
+        if daily_trades_count >= self.max_daily_trades:
+            return False, f"Daily trade limit reached ({daily_trades_count}/{self.max_daily_trades})"
+
+        if abs(min(0, self.daily_pnl)) >= self.initial_balance * self.daily_drawdown_limit:
+            return False, f"Daily drawdown limit reached"
+
+        if spread > self.max_spread:
+            return False, f"Spread too high: {spread:.5f}"
+
+        return True, "Trade validated"
 
 
     def identify_sr_weekly(
@@ -198,11 +241,10 @@ class SR_Bounce_Strategy:
         bar_range = float(last_bar['high']) - float(last_bar['low'])
         current_spread = bar_range * 0.1
 
-        # FTMO validation
-        can_trade, reason = self.risk_manager.can_open_trade(
+        # FTMO validation using internal rules
+        can_trade, reason = self._validate_ftmo_rules(
             current_time=current_time,
-            spread=current_spread,
-            daily_pnl=self.daily_pnl
+            spread=current_spread
         )
 
         if not can_trade:
@@ -246,8 +288,8 @@ class SR_Bounce_Strategy:
         new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
         new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
 
-        # Update FTMO tracking
-        self.risk_manager.update_trade_history({
+        # Add trade to our own tracking
+        self.daily_trades.append({
             'time': new_trade.open_time,
             'type': new_trade.type,
             'size': new_trade.size
