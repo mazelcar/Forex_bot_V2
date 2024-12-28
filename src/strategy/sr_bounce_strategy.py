@@ -5,17 +5,17 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import pandas as pd
 
-from src.strategy.signal_generator import SignalGenerator
+# from src.strategy.signal_generator import SignalGenerator
 
 
 
 
-def get_strategy_logger(name="SR_Bounce_Strategy"):
+def get_strategy_logger(name="SR_Bounce_Strategy", debug=False):
     logger = logging.getLogger(name)
     if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.INFO if not debug else logging.DEBUG)
         ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
+        ch.setLevel(logging.INFO if not debug else logging.DEBUG)
         fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
         ch.setFormatter(fmt)
         logger.addHandler(ch)
@@ -23,6 +23,8 @@ def get_strategy_logger(name="SR_Bounce_Strategy"):
 
 
 class SR_Bounce_Strategy:
+
+
     def __init__(
         self,
         config_file: Optional[str] = None,
@@ -49,11 +51,20 @@ class SR_Bounce_Strategy:
         self.valid_levels = []
         self.avg_atr = 0.0005  # If used for something later
 
-        # Initialize SignalGenerator
-        self.signal_generator = SignalGenerator(
+        self.signal_stats = {
+            "volume_filtered": 0,
+            "first_bounce_recorded": 0,
+            "second_bounce_low_volume": 0,
+            "signals_generated": 0,
+            "tolerance_misses": 0
+        }
+
+        # Initialize internal SignalGenerator
+        self.signal_generator = self.SignalGenerator(
             valid_levels=self.valid_levels,
             params=self.params,
-            log_file="results/signals_debug.log"
+            logger=self.logger,
+            debug=False
         )
 
         self.daily_pnl = 0.0
@@ -204,12 +215,11 @@ class SR_Bounce_Strategy:
         except Exception as e:
             self.logger.error(f"Error updating weekly levels: {str(e)}")
 
+    def validate_signal(self, signal, df_segment):
+        return self.signal_generator.validate_signal(signal, df_segment)
 
     def generate_signals(self, df_segment):
         return self.signal_generator.generate_signal(df_segment)
-
-    def validate_signal(self, signal, df_segment):
-        return self.signal_generator.validate_signal(signal, df_segment)
 
 
     def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
@@ -448,3 +458,145 @@ class SR_Bounce_Strategy:
                 "distance_to_level": self.distance_to_level,
                 "level_type": self.level_type,
             }
+
+    class SignalGenerator:
+        """
+        Inner class for signal generation and bounce detection
+        """
+        def __init__(self, valid_levels, params, logger, debug=False):
+            self.valid_levels = valid_levels
+            self.params = params
+            self.logger = get_strategy_logger("SignalGenerator", debug=debug)
+            self.bounce_registry = {}
+            self.signal_stats = {
+                "volume_filtered": 0,
+                "first_bounce_recorded": 0,
+                "second_bounce_low_volume": 0,
+                "signals_generated": 0,
+                "tolerance_misses": 0
+            }
+
+        def generate_signal(self, df_segment: pd.DataFrame) -> Dict[str, Any]:
+            last_idx = len(df_segment) - 1
+            if last_idx < 0:
+                return self._create_no_signal("Segment has no rows")
+
+            last_bar = df_segment.iloc[last_idx]
+
+            # Volume check with stats tracking
+            if not self._is_volume_sufficient(df_segment, last_idx):
+                self.signal_stats["volume_filtered"] += 1
+                return self._create_no_signal("Volume too low vs. recent average")
+
+            # Check if bar is bullish/bearish
+            close_ = float(last_bar['close'])
+            open_ = float(last_bar['open'])
+            high_ = float(last_bar['high'])
+            low_ = float(last_bar['low'])
+            bullish = close_ > open_
+            bearish = close_ < open_
+
+            # Tolerance for "touch"
+            tol = 0.0005
+
+            for lvl in self.valid_levels:
+                near_support = bullish and (abs(low_ - lvl) <= tol)
+                near_resistance = bearish and (abs(high_ - lvl) <= tol)
+
+                # Track near misses
+                if bullish and not near_support and abs(low_ - lvl) <= tol * 2:
+                    self.signal_stats["tolerance_misses"] += 1
+                if bearish and not near_resistance and abs(high_ - lvl) <= tol * 2:
+                    self.signal_stats["tolerance_misses"] += 1
+
+                if near_support or near_resistance:
+                    # We have potential bounce
+                    self.logger.debug(f"Potential bounce at level={lvl}, barTime={last_bar['time']}, volume={last_bar['tick_volume']}")
+                    signal = self._process_bounce(lvl, float(last_bar['tick_volume']), last_bar['time'], near_support)
+                    if signal and signal["type"] != "NONE":
+                        self.signal_stats["signals_generated"] += 1
+                        return signal
+
+            return self._create_no_signal("No bounce off valid levels")
+
+        def _create_no_signal(self, reason: str) -> Dict[str, Any]:
+            self.logger.debug(f"No signal: {reason}")
+            return {
+                "type": "NONE",
+                "strength": 0.0,
+                "reasons": [reason],
+                "level": None
+            }
+
+        def validate_signal(self, signal, df_segment):
+            return signal["type"] != "NONE"
+
+        def _process_bounce(self, level, volume, time, is_support) -> Optional[Dict[str, Any]]:
+            """
+            Process potential bounce:
+            1. If first bounce at level, record it
+            2. If second bounce, validate and generate signal
+            """
+            if level not in self.bounce_registry:
+                # Mark first bounce
+                self.bounce_registry[level] = {
+                    "first_bounce_volume": volume,
+                    "timestamp": time,
+                    "last_trade_time": None
+                }
+                self.signal_stats["first_bounce_recorded"] += 1
+                self.logger.debug(f"[1st bounce] volume={volume} at lvl={level}")
+                return self._create_no_signal(f"First bounce recorded at {level}")
+
+            # Check cooldown if already traded
+            if self.bounce_registry[level].get("last_trade_time"):
+                last_trade = pd.to_datetime(self.bounce_registry[level]["last_trade_time"])
+                current_time = pd.to_datetime(time)
+                cooldown_period = pd.Timedelta(hours=4)
+
+                if current_time - last_trade < cooldown_period:
+                    return self._create_no_signal(f"Level {level} in cooldown")
+
+            # Process second bounce
+            first_vol = self.bounce_registry[level]["first_bounce_volume"]
+            if volume < first_vol * 0.7:
+                self.signal_stats["second_bounce_low_volume"] += 1
+                return self._create_no_signal("Second bounce volume insufficient")
+
+            bounce_type = "BUY" if is_support else "SELL"
+            reason = f"Valid bounce at {'support' if is_support else 'resistance'} {level}"
+
+            # Update last trade time
+            self.bounce_registry[level]["last_trade_time"] = time
+            self.signal_stats["signals_generated"] += 1
+
+            return {
+                "type": bounce_type,
+                "strength": 0.8,
+                "reasons": [reason],
+                "level": level
+            }
+
+        def _is_volume_sufficient(
+            self,
+            df: pd.DataFrame,
+            current_index: int,
+            lookback_bars: int = 20,
+            min_ratio: float = 0.5
+        ) -> bool:
+            """
+            Checks if the current bar's volume is at least `min_ratio`
+            times the average of the last `lookback_bars` volumes.
+            """
+            if current_index < 1:
+                return False
+
+            current_vol = df.iloc[current_index]['tick_volume']
+            start_idx = max(current_index - lookback_bars, 0)
+            recent_vol = df['tick_volume'].iloc[start_idx:current_index]
+
+            if len(recent_vol) == 0:
+                return False
+
+            avg_vol = recent_vol.mean()
+            return current_vol >= (min_ratio * avg_vol)
