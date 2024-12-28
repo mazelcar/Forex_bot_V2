@@ -215,8 +215,6 @@ class SR_Bounce_Strategy:
         except Exception as e:
             self.logger.error(f"Error updating weekly levels: {str(e)}")
 
-    def validate_signal(self, signal, df_segment):
-        return self.signal_generator.validate_signal(signal, df_segment)
 
     def generate_signals(self, df_segment):
         return self.signal_generator.generate_signal(df_segment)
@@ -527,9 +525,6 @@ class SR_Bounce_Strategy:
                 "reasons": [reason],
                 "level": None
             }
-
-        def validate_signal(self, signal, df_segment):
-            return signal["type"] != "NONE"
 
         def _process_bounce(self, level, volume, time, is_support) -> Optional[Dict[str, Any]]:
             """

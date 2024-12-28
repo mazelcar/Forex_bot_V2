@@ -1,7 +1,5 @@
 import logging
-import random
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 import os
@@ -36,25 +34,6 @@ def get_logger(name="runner", logfile="runner_debug.log"):
     return logger
 
 logger = get_logger(name="runner", logfile="runner_debug.log")
-
-
-
-
-
-def load_market_news(news_file="config/market_news.json") -> List[Dict]:
-    """Attempt to load market news JSON. If unavailable, return an empty list."""
-    import json
-    if not os.path.exists(news_file):
-        logger.warning(f"Market news file not found: {news_file}. Proceeding without it.")
-        return []
-
-    try:
-        with open(news_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-    except Exception as e:
-        logger.error(f"Error loading market_news.json: {str(e)}")
-        return []
 
 
 def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_date=None, max_retries=3) -> pd.DataFrame:
