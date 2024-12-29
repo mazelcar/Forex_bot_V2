@@ -120,28 +120,58 @@ class SR_Bounce_Strategy:
         except Exception as e:
             print(f"[WARNING] Unable to load {config_file}: {e}")
 
-    def _validate_ftmo_rules(self, current_time: datetime, spread: float) -> Tuple[bool, str]:
-        """Internal FTMO validation logic"""
+    def _validate_ftmo_rules(self, current_time: datetime, spread: float, symbol: str = "EURUSD") -> Tuple[bool, str]:
+        """Enhanced FTMO validation logic with multi-pair support"""
         trade_date = pd.to_datetime(current_time).date()
 
         # Reset counters if needed
         if trade_date != self.last_reset:
-            self.daily_trades = []
+            self.daily_trades = {}  # Reset as dictionary for all symbols
             self.last_reset = trade_date
             self.daily_pnl = 0.0
 
-        # Check daily trade count
-        daily_trades_count = len([t for t in self.daily_trades
+        # Initialize symbol tracking if needed
+        if symbol not in self.daily_trades:
+            self.daily_trades[symbol] = []
+
+        # Check daily trade count for this symbol
+        daily_trades_count = len([t for t in self.daily_trades.get(symbol, [])
                                 if pd.to_datetime(t['time']).date() == trade_date])
 
         if daily_trades_count >= self.max_daily_trades:
-            return False, f"Daily trade limit reached ({daily_trades_count}/{self.max_daily_trades})"
+            return False, f"Daily trade limit reached for {symbol} ({daily_trades_count}/{self.max_daily_trades})"
 
-        if abs(min(0, self.daily_pnl)) >= self.initial_balance * self.daily_drawdown_limit:
-            return False, f"Daily drawdown limit reached"
+        # Calculate total exposure across all symbols
+        total_exposure = sum(
+            abs(t.get('exposure', 0))
+            for sym in self.daily_trades
+            for t in self.daily_trades[sym]
+            if pd.to_datetime(t['time']).date() == trade_date
+        )
+
+        if total_exposure >= self.ftmo_limits["total_exposure"]:
+            return False, f"Total exposure limit reached ({total_exposure}/{self.ftmo_limits['total_exposure']})"
+
+        # Check correlation limits
+        active_pairs = [sym for sym in self.daily_trades if self.daily_trades[sym]]
+        if symbol in self.symbol_correlations:
+            for other_symbol in active_pairs:
+                if other_symbol in self.symbol_correlations[symbol]:
+                    correlation = abs(self.symbol_correlations[symbol][other_symbol])
+                    if correlation > self.ftmo_limits["correlation_limit"]:
+                        return False, f"Correlation too high between {symbol} and {other_symbol}"
+
+        # Check daily loss limit per symbol
+        symbol_daily_loss = abs(min(0, sum(
+            t.get('pnl', 0) for t in self.daily_trades.get(symbol, [])
+            if pd.to_datetime(t['time']).date() == trade_date
+        )))
+
+        if symbol_daily_loss >= self.ftmo_limits["daily_loss_per_pair"]:
+            return False, f"Daily loss limit reached for {symbol}"
 
         if spread > self.max_spread:
-            return False, f"Spread too high: {spread:.5f}"
+            return False, f"Spread too high for {symbol}: {spread:.5f}"
 
         return True, "Trade validated"
 
@@ -149,16 +179,18 @@ class SR_Bounce_Strategy:
     def identify_sr_weekly(
         self,
         df_h1: pd.DataFrame,
+        symbol: str = "EURUSD",
         weeks: int = 12,
         chunk_size: int = 24,
         weekly_buffer: float = 0.0003
     ) -> List[float]:
         """
         Identify significant S/R levels from H1 data over the last `weeks` weeks.
+        Now symbol-aware and includes correlation checks.
         """
         try:
             if df_h1.empty:
-                self.logger.error("Empty dataframe in identify_sr_weekly.")
+                self.logger.error(f"Empty dataframe in identify_sr_weekly for {symbol}")
                 return []
 
             # Filter to last `weeks` weeks
@@ -167,10 +199,10 @@ class SR_Bounce_Strategy:
             recent_df = df_h1[df_h1["time"] >= cutoff_time].copy()
             recent_df.sort_values("time", inplace=True)
 
-            self.logger.info(f"Analyzing data from {recent_df['time'].min()} to {recent_df['time'].max()}")
+            self.logger.info(f"Analyzing {symbol} data from {recent_df['time'].min()} to {recent_df['time'].max()}")
 
             if recent_df.empty:
-                self.logger.warning("No data after filtering for recent weeks.")
+                self.logger.warning(f"No data after filtering for recent weeks for {symbol}")
                 return []
 
             # Calculate average volume for significance
@@ -184,22 +216,23 @@ class SR_Bounce_Strategy:
                 if len(window) < chunk_size / 2:  # skip small windows
                     continue
 
-                # High & Low
+                # High & Low with volume validation
                 high = float(window['high'].max())
                 low = float(window['low'].min())
 
                 high_volume = float(window.loc[window['high'] == high, 'tick_volume'].max())
                 low_volume = float(window.loc[window['low'] == low, 'tick_volume'].max())
 
+                # Add levels if volume significant
                 if high_volume > volume_threshold:
                     potential_levels.append(high)
-                    self.logger.debug(f"High level found at {high:.5f} with volume {high_volume}")
+                    self.logger.debug(f"{symbol} High level found at {high:.5f} with volume {high_volume}")
 
                 if low_volume > volume_threshold:
                     potential_levels.append(low)
-                    self.logger.debug(f"Low level found at {low:.5f} with volume {low_volume}")
+                    self.logger.debug(f"{symbol} Low level found at {low:.5f} with volume {low_volume}")
 
-            # Sort & merge nearby
+            # Sort & merge nearby levels
             potential_levels = sorted(set(potential_levels))
             merged_levels = []
             for lvl in potential_levels:
@@ -208,36 +241,48 @@ class SR_Bounce_Strategy:
                 else:
                     merged_levels[-1] = (merged_levels[-1] + lvl) / 2.0
 
-            self.logger.info(f"Identified {len(merged_levels)} valid S/R levels")
+            # Store in symbol_levels dictionary
+            self.symbol_levels[symbol] = merged_levels
+
+            self.logger.info(f"Identified {len(merged_levels)} valid S/R levels for {symbol}")
             return merged_levels
 
         except Exception as e:
-            self.logger.error(f"Error in identify_sr_weekly: {str(e)}")
+            self.logger.error(f"Error in identify_sr_weekly for {symbol}: {str(e)}")
             return []
 
 
-    def update_weekly_levels(self, df_h1, weeks: int = 3, weekly_buffer: float = 0.00060):
+    def update_weekly_levels(self, df_h1, symbol: str = "EURUSD", weeks: int = 3, weekly_buffer: float = 0.00060):
         """
         Update the strategy's valid levels using weekly S/R from identify_sr_weekly.
+        Now symbol-aware.
         """
         try:
             w_levels = self.identify_sr_weekly(
                 df_h1,
+                symbol=symbol,
                 weeks=weeks,
                 weekly_buffer=weekly_buffer
             )
             if not w_levels:
-                self.logger.warning("No weekly levels found.")
+                self.logger.warning(f"No weekly levels found for {symbol}")
                 return
 
-            self.valid_levels = w_levels
-            self.logger.info(f"Updated valid levels. Total: {len(self.valid_levels)}")
+            # Update the symbol-specific levels
+            self.symbol_levels[symbol] = w_levels
 
-            # Update signal generator's levels
-            self.signal_generator.valid_levels = self.valid_levels
+            # For backward compatibility with existing code
+            if symbol == self.default_symbol:
+                self.valid_levels = w_levels
+
+            self.logger.info(f"Updated valid levels for {symbol}. Total: {len(w_levels)}")
+
+            # Update signal generator's levels for the current symbol
+            if symbol == self.default_symbol:
+                self.signal_generator.valid_levels = w_levels
 
         except Exception as e:
-            self.logger.error(f"Error updating weekly levels: {str(e)}")
+            self.logger.error(f"Error updating weekly levels for {symbol}: {str(e)}")
 
 
     def generate_signals(self, df_segment):
@@ -341,7 +386,8 @@ class SR_Bounce_Strategy:
         # FTMO validation using internal rules
         can_trade, reason = self._validate_ftmo_rules(
             current_time=current_time,
-            spread=current_spread
+            spread=current_spread,
+            symbol=self.default_symbol  # Use default symbol for now
         )
 
         if not can_trade:
@@ -385,8 +431,12 @@ class SR_Bounce_Strategy:
         new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
         new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
 
+        # Initialize symbol in daily_trades if not exists
+        if self.default_symbol not in self.daily_trades:
+            self.daily_trades[self.default_symbol] = []
+
         # Add trade to our own tracking
-        self.daily_trades.append({
+        self.daily_trades[self.default_symbol].append({
             'time': new_trade.open_time,
             'type': new_trade.type,
             'size': new_trade.size
