@@ -3,7 +3,6 @@ import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Optional
 import os
-
 import pytz
 
 # Import your local modules
@@ -12,12 +11,6 @@ from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
 from src.strategy.data_validator import DataValidator
 from src.strategy.report_writer import ReportWriter
 from src.strategy.report_writer import analyze_trades
-
-
-
-
-
-
 
 # -------------------------------------------------------
 # Setup logging (Avoid multiple handlers)
@@ -112,7 +105,7 @@ def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool
 
     # Only invalid if not extreme spread and OHLC invalid
     invalid_prices = df[
-        ~df['is_extreme_spread'] &  # Not an extreme spread event
+        ~df['is_extreme_spread'] &
         ((df['high'] < df['low']) |
          (df['close'] > df['high']) |
          (df['close'] < df['low']) |
@@ -189,7 +182,6 @@ def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool
                 gap_start = df_sorted.loc[idx-1, 'time']
                 print(f"Gap of {time_diffs[idx]} at {gap_start}")
 
-    # Quality checks
     if completeness < 90:
         print("ERROR: Data completeness below 90%")
         return False
@@ -217,13 +209,13 @@ def resample_m15_to_h1(df_m15: pd.DataFrame) -> pd.DataFrame:
     df_m15.set_index("time", inplace=True)
     df_m15.sort_index(inplace=True)
 
-    df_h1_resampled = df_m15.resample("1h").agg({  # Changed from "1H" to "1h"
-    "open": "first",
-    "high": "max",
-    "low": "min",
-    "close": "last",
-    "tick_volume": "sum",
-})
+    df_h1_resampled = df_m15.resample("1h").agg({
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "tick_volume": "sum",
+    })
     df_h1_resampled.dropna(subset=["open", "high", "low", "close"], inplace=True)
     df_h1_resampled.reset_index(inplace=True)
     return df_h1_resampled
@@ -279,8 +271,7 @@ def fallback_resample_from_m15(symbol: str, start: datetime, end: datetime) -> p
     df_m15 = load_data(symbol=symbol, timeframe="M15", start_date=start, end_date=end)
     if df_m15.empty:
         logger.error("M15 fallback data also empty. Returning empty.")
-        return pd.DataFrame()  # still empty
-    # Resample
+        return pd.DataFrame()
     df_h1_resampled = resample_m15_to_h1(df_m15)
     try:
         validate_data_for_backtest(df_h1_resampled, timeframe="H1")
@@ -322,7 +313,6 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
         if current_day != bar_date:
             current_day = bar_date
             daily_high_balance = balance
-            daily_floating_pnl = 0
             logger.debug(f"New trading day: {bar_date}, Balance reset: {balance}")
 
         # Update daily high water mark
@@ -339,7 +329,6 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
             # Check FTMO daily drawdown limit including floating PnL
             total_daily_drawdown = (balance + floating_pnl - daily_high_balance) / initial_balance
             if total_daily_drawdown < -0.05:  # 5% daily drawdown limit
-                # Force close the trade
                 balance += floating_pnl
                 active_trade.close_i = current_bar.name
                 active_trade.close_time = current_bar['time']
@@ -351,8 +340,7 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
 
             # Check max drawdown limit (10%)
             total_drawdown = (balance + floating_pnl - initial_balance) / initial_balance
-            if total_drawdown < -0.10:  # 10% max drawdown limit
-                # Force close the trade
+            if total_drawdown < -0.10:
                 balance += floating_pnl
                 active_trade.close_i = current_bar.name
                 active_trade.close_time = current_bar['time']
@@ -388,7 +376,7 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
         last_close = float(last_bar["close"])
         if active_trade.type == "BUY":
             pnl = (last_close - active_trade.entry_price) * 10000.0 * active_trade.size
-        else:  # SELL
+        else:
             pnl = (active_trade.entry_price - last_close) * 10000.0 * active_trade.size
 
         balance += pnl
@@ -405,44 +393,106 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
     }
 
 
+# -------------------------------------------------------------
+#  STEP 3: Multi-Symbol Data Management (Modified main)
+# -------------------------------------------------------------
 def main():
     print("\nStarting backtest with enhanced data validation...")
 
-    symbol = "EURUSD"
+    # STEP 3: We will load multiple symbols in parallel
+    symbols = ["EURUSD", "GBPUSD"]
     timeframe = "M15"
     days = 180
 
-    print(f"\nLoading {timeframe} data for {symbol}...")
-    df = load_data(symbol, timeframe, days=days)
-    if df.empty:
-        print("ERROR: No valid data loaded. Exiting main().")
-        return
+    # Dictionary to hold validated data for each symbol
+    symbol_data_dict = {}
 
-    # If data passes validation, continue with backtest
+    # Load and validate data for each symbol
+    for symbol in symbols:
+        print(f"\nLoading {timeframe} data for {symbol}...")
+        df = load_data(symbol, timeframe, days=days)
+
+        if df.empty:
+            print(f"ERROR: No valid data loaded for {symbol}. Skipping.")
+            continue
+
+        # Validate data
+        if not validate_data_for_backtest(df, timeframe):
+            print(f"ERROR: Validation failed for {symbol}. Skipping.")
+            continue
+
+        # Store validated data
+        symbol_data_dict[symbol] = df
+
+    # If we don't have at least 2 symbols with data, just proceed with single-symbol logic
+    if len(symbol_data_dict) < 2:
+        print("Warning: Less than 2 symbols loaded. Proceeding with single-symbol backtest on whatever is available...")
+        # Attempt to pick any available symbol
+        if len(symbol_data_dict) == 0:
+            print("No symbols available. Exiting main().")
+            return
+        default_symbol = list(symbol_data_dict.keys())[0]
+        df = symbol_data_dict[default_symbol]
+    else:
+        # If we have both, do a correlation check
+        # For simplicity, let's do a basic time-based merge on "close" for correlation
+        df_eu = symbol_data_dict["EURUSD"].copy()
+        df_gb = symbol_data_dict["GBPUSD"].copy()
+
+        # Merge on 'time' to align bars
+        df_eu.rename(columns={"close": "close_eu"}, inplace=True)
+        df_gb.rename(columns={"close": "close_gb"}, inplace=True)
+
+        merged = pd.merge(
+            df_eu[["time", "close_eu"]],
+            df_gb[["time", "close_gb"]],
+            on="time",
+            how="inner",
+        )
+
+        # Simple correlation
+        corr = merged["close_eu"].corr(merged["close_gb"])
+        print(f"\nCorrelation between EURUSD and GBPUSD (close prices): {corr:.4f}")
+
+        # Detect major time gaps across symbols
+        # We'll do a simple time diff approach after merge
+        merged = merged.sort_values("time").reset_index(drop=True)
+        time_diffs = merged["time"].diff().fillna(pd.Timedelta(seconds=0))
+        large_gaps = time_diffs[time_diffs > pd.Timedelta(hours=1)]
+        if not large_gaps.empty:
+            print(f"Found {len(large_gaps)} cross-symbol gap(s) greater than 1 hour:")
+            for idx in large_gaps.index:
+                gap_start = merged.loc[idx-1, 'time'] if idx > 0 else None
+                gap_end = merged.loc[idx, 'time']
+                print(f"Gap from {gap_start} to {gap_end} = {time_diffs[idx]}")
+
+        # For demonstration, we'll backtest only on EURUSD
+        default_symbol = "EURUSD"
+        df = symbol_data_dict[default_symbol]
+
+    # Standard single-pair approach using df
     train_df, test_df = split_data_for_backtest(df, 0.8)
     print(f"Train/Test split: {len(train_df)} / {len(test_df)} bars")
 
     # Prepare H1 data for S/R
     test_start = pd.to_datetime(test_df['time'].min())
     test_end = pd.to_datetime(test_df['time'].max())
-
-    # e.g., 45 days prior to test start
     h1_start = test_start - timedelta(days=45)
 
-    print(f"\nFetching H1 data from {h1_start} to {test_end} ...")
-    df_h1 = check_h1_data_or_resample(symbol, h1_start, test_end, threshold=0.90)
+    print(f"\nFetching H1 data from {h1_start} to {test_end} for {default_symbol}...")
+    df_h1 = check_h1_data_or_resample(default_symbol, h1_start, test_end, threshold=0.90)
     if df_h1.empty:
         print("Failed to load or resample H1 data. Exiting.")
         return
     validate_data_for_backtest(df_h1, "H1")
 
-    # Instantiate strategy with default or config
-    strategy = SR_Bounce_Strategy(config_file=None)  # or specify a config_file
+    # Instantiate strategy
+    strategy = SR_Bounce_Strategy(config_file=None)
 
-    # Use 2 weeks of data for weekly S/R
+    # Update weekly levels using H1
     strategy.update_weekly_levels(df_h1, weeks=2, weekly_buffer=0.00075)
 
-    # Example: check training bounces (optional)
+    # Example: check training bounces
     print("\n--- Checking for bounces in the TRAINING SET ---")
     bounce_count = 0
     for i in range(len(train_df)):
@@ -472,7 +522,7 @@ def main():
     now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = "results"
     os.makedirs(output_dir, exist_ok=True)
-    report_file = os.path.join(output_dir, f"BACKTEST_REPORT_{symbol}_{now_str}.md")
+    report_file = os.path.join(output_dir, f"BACKTEST_REPORT_{default_symbol}_{now_str}.md")
 
     with ReportWriter(report_file) as writer:
         writer.write_data_overview(test_df)
@@ -482,6 +532,7 @@ def main():
         writer.write_sr_levels([], [])
 
     print(f"\nDetailed report written to: {report_file}")
+
     # Signal Generation Stats printing
     print("\n--- Signal Generation Stats ---")
     print(f"Potential signals filtered due to volume: {strategy.signal_generator.signal_stats['volume_filtered']}")
@@ -492,7 +543,7 @@ def main():
 
     # Data Quality Stats
     validator = DataValidator()
-    df, quality_metrics = validator.validate_and_clean_data(df, timeframe)
+    df_checked, quality_metrics = validator.validate_and_clean_data(df, timeframe)
     if quality_metrics.get('true_gaps_detected', 0) > 0:
         print(f"WARNING: Found {quality_metrics['true_gaps_detected']} unexpected gaps during trading hours")
     print(f"Weekend gaps: {quality_metrics.get('weekend_gaps', 0)}")
