@@ -34,9 +34,9 @@ class SR_Bounce_Strategy:
         # Default params - now including risk_reward
         self.params = {
             "min_touches": 8,
-            "min_volume_threshold": 1500,
+            "min_volume_threshold": 1200,
             "margin_pips": 0.0030,
-            "risk_reward": 2.0,          # Moved from TradeManager
+            "risk_reward": 3.0,          # Moved from TradeManager
             "lookforward_minutes": 30,
         }
 
@@ -192,7 +192,7 @@ class SR_Bounce_Strategy:
             return []
 
 
-    def update_weekly_levels(self, df_h1, weeks: int = 2, weekly_buffer: float = 0.00075):
+    def update_weekly_levels(self, df_h1, weeks: int = 3, weekly_buffer: float = 0.00060):
         """
         Update the strategy's valid levels using weekly S/R from identify_sr_weekly.
         """
@@ -501,6 +501,11 @@ class SR_Bounce_Strategy:
                 near_support = bullish and (abs(low_ - lvl) <= tol)
                 near_resistance = bearish and (abs(high_ - lvl) <= tol)
 
+                # Add distance check
+                distance_pips = abs(close_ - lvl) * 10000
+                if distance_pips > 15:  # More than 15 pips away
+                    continue  # Skip this level if too far
+
                 # Track near misses
                 if bullish and not near_support and abs(low_ - lvl) <= tol * 2:
                     self.signal_stats["tolerance_misses"] += 1
@@ -547,14 +552,14 @@ class SR_Bounce_Strategy:
             if self.bounce_registry[level].get("last_trade_time"):
                 last_trade = pd.to_datetime(self.bounce_registry[level]["last_trade_time"])
                 current_time = pd.to_datetime(time)
-                cooldown_period = pd.Timedelta(hours=4)
+                cooldown_period = pd.Timedelta(hours=2)
 
                 if current_time - last_trade < cooldown_period:
                     return self._create_no_signal(f"Level {level} in cooldown")
 
             # Process second bounce
             first_vol = self.bounce_registry[level]["first_bounce_volume"]
-            if volume < first_vol * 0.7:
+            if volume < first_vol * 0.6:
                 self.signal_stats["second_bounce_low_volume"] += 1
                 return self._create_no_signal("Second bounce volume insufficient")
 
