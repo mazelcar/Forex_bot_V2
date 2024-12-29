@@ -291,10 +291,10 @@ def fallback_resample_from_m15(symbol: str, start: datetime, end: datetime) -> p
 
 def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance=10000.0) -> Dict:
     """
-    Simple backtest engine that:
-    - Iterates over the DF
-    - Opens trades if signal is triggered
-    - Exits trades if conditions are met
+    Enhanced backtest engine that:
+    - Tracks floating PnL
+    - Monitors FTMO daily and max drawdown limits
+    - Forces position closure when limits are breached
     - Returns final trades & balance
     """
     if df.empty:
@@ -304,8 +304,10 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
     trades: list["SR_Bounce_Strategy.Trade"] = []
     balance = initial_balance
     active_trade: Optional["SR_Bounce_Strategy.Trade"] = None
+    daily_high_balance = initial_balance
+    current_day = None
 
-    logger.debug("Starting backtest run...")
+    logger.debug("Starting backtest run with FTMO compliance...")
 
     for i in range(len(df)):
         current_segment = df.iloc[: i + 1]
@@ -313,13 +315,54 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
         if len(current_segment) < 5:
             continue
 
-        if active_trade is None:
-            new_trade = strategy.open_trade(current_segment, balance, i)
-            if new_trade:
-                active_trade = new_trade
-                trades.append(active_trade)
-                logger.debug(f"New trade opened: {new_trade.type} at {new_trade.entry_price}")
-        else:
+        current_bar = current_segment.iloc[-1]
+        bar_date = pd.to_datetime(current_bar['time']).date()
+
+        # Reset daily tracking on new day
+        if current_day != bar_date:
+            current_day = bar_date
+            daily_high_balance = balance
+            daily_floating_pnl = 0
+            logger.debug(f"New trading day: {bar_date}, Balance reset: {balance}")
+
+        # Update daily high water mark
+        daily_high_balance = max(daily_high_balance, balance)
+
+        # Calculate floating PnL if trade is active
+        if active_trade:
+            current_price = float(current_bar['close'])
+            if active_trade.type == "BUY":
+                floating_pnl = (current_price - active_trade.entry_price) * 10000.0 * active_trade.size
+            else:  # SELL
+                floating_pnl = (active_trade.entry_price - current_price) * 10000.0 * active_trade.size
+
+            # Check FTMO daily drawdown limit including floating PnL
+            total_daily_drawdown = (balance + floating_pnl - daily_high_balance) / initial_balance
+            if total_daily_drawdown < -0.05:  # 5% daily drawdown limit
+                # Force close the trade
+                balance += floating_pnl
+                active_trade.close_i = current_bar.name
+                active_trade.close_time = current_bar['time']
+                active_trade.close_price = current_price
+                active_trade.pnl = floating_pnl
+                logger.warning(f"Force closed trade due to daily drawdown limit at {current_bar['time']}")
+                active_trade = None
+                continue
+
+            # Check max drawdown limit (10%)
+            total_drawdown = (balance + floating_pnl - initial_balance) / initial_balance
+            if total_drawdown < -0.10:  # 10% max drawdown limit
+                # Force close the trade
+                balance += floating_pnl
+                active_trade.close_i = current_bar.name
+                active_trade.close_time = current_bar['time']
+                active_trade.close_price = current_price
+                active_trade.pnl = floating_pnl
+                logger.warning(f"Force closed trade due to max drawdown limit at {current_bar['time']}")
+                active_trade = None
+                continue
+
+            # Check regular exit conditions if no force close
             should_close, fill_price, pnl = strategy.exit_trade(current_segment, active_trade)
             if should_close:
                 balance += pnl
@@ -331,7 +374,15 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
                 logger.debug(f"Trade closed: PnL={pnl:.2f}")
                 active_trade = None
 
-    # If a trade is still open at the end, force close
+        # Try to open new trade if none active
+        if active_trade is None:
+            new_trade = strategy.open_trade(current_segment, balance, i)
+            if new_trade:
+                active_trade = new_trade
+                trades.append(active_trade)
+                logger.debug(f"New trade opened: {new_trade.type} at {new_trade.entry_price}")
+
+    # Force close any remaining trade at the end
     if active_trade:
         last_bar = df.iloc[-1]
         last_close = float(last_bar["close"])
