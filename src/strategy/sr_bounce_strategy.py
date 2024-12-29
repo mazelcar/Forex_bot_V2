@@ -31,12 +31,12 @@ class SR_Bounce_Strategy:
         logger: logging.Logger = None,
         news_file: str = "config/market_news.json"
     ):
-        # Default params - now including risk_reward
+        # Default params
         self.params = {
             "min_touches": 8,
             "min_volume_threshold": 1200,
             "margin_pips": 0.0030,
-            "risk_reward": 3.0,          # Moved from TradeManager
+            "risk_reward": 3.0,
             "lookforward_minutes": 30,
         }
 
@@ -47,10 +47,54 @@ class SR_Bounce_Strategy:
         # Setup logger
         self.logger = logger or get_strategy_logger()
 
-        # Data structures
-        self.valid_levels = []
-        self.avg_atr = 0.0005  # If used for something later
+        # Multi-symbol data structures
+        self.symbol_data = {}  # Store data per symbol
+        self.symbol_levels = {}  # Store S/R levels per symbol
+        self.symbol_bounce_registry = {}  # Store bounces per symbol
 
+        # Correlation tracking
+        self.symbol_correlations = {
+            "EURUSD": {
+                "GBPUSD": 0.0,
+                "USDJPY": 0.0
+            }
+        }
+
+        # FTMO multi-pair limits
+        self.ftmo_limits = {
+            "daily_loss_per_pair": 5000,  # $5000 max loss per pair
+            "total_exposure": 25000,      # $25000 max total exposure
+            "correlation_limit": 0.75,    # Max correlation between pairs
+            "max_correlated_positions": 2  # Max number of correlated pairs
+        }
+
+        # Default symbol
+        self.default_symbol = "EURUSD"
+
+        # Initialize data structures for default symbol
+        self.symbol_data[self.default_symbol] = []
+        self.symbol_levels[self.default_symbol] = []
+        self.symbol_bounce_registry[self.default_symbol] = {}
+
+        # Existing FTMO Parameters - now per symbol
+        self.initial_balance = 100000.0
+        self.current_balance = self.initial_balance
+        self.daily_high_balance = self.initial_balance
+        self.daily_trades = {}  # Now stores trades per symbol
+
+        # FTMO Limits
+        self.daily_drawdown_limit = 0.05  # 5% daily
+        self.max_drawdown_limit = 0.10    # 10% total
+        self.profit_target = 0.10         # 10% profit target
+
+        # Trading rules
+        self.max_positions = 3
+        self.max_daily_trades = 8
+        self.max_spread = 0.002  # Maximum 2 pip spread
+
+        self.last_reset = datetime.now().date()
+
+        # Initialize signal generator with symbol awareness
         self.signal_stats = {
             "volume_filtered": 0,
             "first_bounce_recorded": 0,
@@ -61,31 +105,11 @@ class SR_Bounce_Strategy:
 
         # Initialize internal SignalGenerator
         self.signal_generator = self.SignalGenerator(
-            valid_levels=self.valid_levels,
+            valid_levels=self.symbol_levels[self.default_symbol],
             params=self.params,
             logger=self.logger,
             debug=False
         )
-
-        self.daily_pnl = 0.0
-
-        # FTMO Parameters
-        self.initial_balance = 100000.0
-        self.current_balance = self.initial_balance
-        self.daily_high_balance = self.initial_balance
-        self.daily_trades = []
-
-        # FTMO Limits
-        self.daily_drawdown_limit = 0.05  # 5% daily
-        self.max_drawdown_limit = 0.10    # 10% total
-        self.profit_target = 0.10         # 10% profit target
-
-        # Trading rules
-        self.max_positions = 3
-        self.max_daily_trades = 8
-        self.max_spread = 0.002  # Maximum 3 pip spread
-
-        self.last_reset = datetime.now().date()
 
 
     def _load_config(self, config_file: str):
