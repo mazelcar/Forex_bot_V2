@@ -35,52 +35,130 @@ logger = get_logger(name="runner", logfile="runner_debug.log")
 
 def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_date=None, max_retries=3) -> pd.DataFrame:
     """
-    Enhanced data loader with Step 1 date fix + Step 2 CSV storage.
-    Fetches from broker only if no local CSV or CSV is empty.
+    STEP 3: Modified data loader to use existing CSV for the requested date range.
+    If the CSV exists and fully covers the requested range, we only return the relevant portion.
+    If it's incomplete, we fetch the missing portion from the broker, merge, and re-save.
+    If no CSV exists or it's empty for our date range, we fetch from the broker.
+
+    This function also retains:
+      - Step 1: Fixed date range if 'days' is specified
+      - Step 2: CSV storage after successful broker fetch
     """
-    # -------------------------------------------------
-    # STEP 2: Check local CSV first, to avoid re-fetching
-    # -------------------------------------------------
+
+    import os
+    import pandas as pd
+    import pytz
+    from datetime import datetime, timedelta
+    from src.core.mt5 import MT5Handler
+    from src.strategy.data_storage import save_data_to_csv, load_data_from_csv
+
     csv_filename = f"{symbol}_{timeframe}_data.csv"
+
+    # -------------------------------------------------
+    # Check local CSV data first
+    # -------------------------------------------------
+    df_local = pd.DataFrame()
     if os.path.exists(csv_filename):
-        print(f"Found local CSV: {csv_filename}, skipping broker fetch...")
         df_local = load_data_from_csv(csv_filename)
         if not df_local.empty:
-            print(f"Loaded {len(df_local)} bars from local CSV.")
-            return df_local
-        else:
-            print("Local CSV is empty; proceeding with broker fetch...")
+            df_local["time"] = pd.to_datetime(df_local["time"], utc=True)
 
-    mt5 = MT5Handler(debug=True)
-    print(f"Attempting to load {symbol} {timeframe} data...")
-
-    # ----- STEP 1: FIX DATE RANGE (already implemented) -----
+    # If 'days' is specified without explicit start/end, use a fixed reference date
     if days and not start_date and not end_date:
-        end_date = datetime(2023, 1, 1, tzinfo=pytz.UTC)  # Fixed date instead of datetime.now()
+        end_date = datetime(2023, 1, 1, tzinfo=pytz.UTC)
         start_date = end_date - timedelta(days=days)
-        print(f"Date range: {start_date} to {end_date}")
-    # --------------------------------------------------------
+        print(f"Date range (Step 1 fix): {start_date} to {end_date}")
+
+    if not df_local.empty and start_date and end_date:
+        local_min = df_local['time'].min()
+        local_max = df_local['time'].max()
+
+        # If local CSV fully covers the requested range, just slice and return
+        if local_min <= start_date and local_max >= end_date:
+            df_requested = df_local[(df_local['time'] >= start_date) & (df_local['time'] <= end_date)]
+            if not df_requested.empty:
+                print(f"Local CSV covers {symbol} {timeframe} from {start_date} to {end_date}, "
+                      f"returning {len(df_requested)} bars.")
+                return df_requested
+            else:
+                print("Local CSV does not have any bars in the requested sub-range, proceeding with broker fetch...")
+        else:
+            # Partial coverage
+            missing_start = None
+            missing_end = None
+
+            if local_min > start_date:
+                missing_start = start_date
+                missing_end = local_min - timedelta(minutes=1)
+
+            if local_max < end_date:
+                if missing_start is None:
+                    missing_start = local_max + timedelta(minutes=1)
+                missing_end = end_date
+
+            if missing_start and missing_end:
+                print(f"Local CSV partially covers {symbol} {timeframe}. "
+                      f"Fetching missing portion: {missing_start} to {missing_end}")
+
+                mt5 = MT5Handler(debug=True)
+                df_missing = pd.DataFrame()
+
+                for attempt in range(max_retries):
+                    try:
+                        print(f"Attempt {attempt + 1} of {max_retries} for missing portion")
+                        df_partial = mt5.get_historical_data(symbol, timeframe, missing_start, missing_end)
+                        if df_partial is not None and not df_partial.empty:
+                            df_partial["time"] = pd.to_datetime(df_partial["time"], utc=True)
+                            df_missing = pd.concat([df_missing, df_partial], ignore_index=True)
+                            print(f"Fetched {len(df_partial)} bars for the missing portion.")
+                        else:
+                            print("Broker returned empty or None data for missing portion.")
+                        break
+                    except Exception as e:
+                        print(f"Error fetching missing portion on attempt {attempt + 1}: {str(e)}")
+                        missing_start -= timedelta(days=5)
+
+                if not df_missing.empty:
+                    df_merged = pd.concat([df_local, df_missing], ignore_index=True)
+                    df_merged["time"] = pd.to_datetime(df_merged["time"], utc=True)
+                    df_merged.drop_duplicates(subset=["time"], keep="last", inplace=True)
+                    df_merged.sort_values("time", inplace=True)
+                    df_local = df_merged.reset_index(drop=True)
+
+                    save_data_to_csv(df_local, csv_filename)
+                    df_requested = df_local[(df_local['time'] >= start_date) & (df_local['time'] <= end_date)]
+                    print(f"Returning merged data slice with {len(df_requested)} bars.")
+                    return df_requested
+                else:
+                    print("Failed to fetch any missing data from broker; returning local CSV as fallback.")
+                    return df_local[(df_local['time'] >= start_date) & (df_local['time'] <= end_date)]
+            else:
+                df_requested = df_local[(df_local['time'] >= start_date) & (df_local['time'] <= end_date)]
+                print(f"Local CSV partial coverage doesn't overlap properly with {symbol} {timeframe}, "
+                      f"returning {len(df_requested)} bars from local data.")
+                return df_requested
+
+    elif not df_local.empty and not start_date and not end_date:
+        print(f"Found local CSV: {csv_filename} with {len(df_local)} bars, no date range requested.")
+        return df_local
+
+    print(f"Fetching {symbol} {timeframe} from broker...")
+    mt5 = MT5Handler(debug=True)
 
     for attempt in range(max_retries):
         try:
             print(f"Attempt {attempt + 1} of {max_retries}")
             df = mt5.get_historical_data(symbol, timeframe, start_date, end_date)
-
             if df is None:
-                print(f"MT5 returned None on attempt {attempt + 1}")
+                print(f"Broker returned None on attempt {attempt + 1}")
                 continue
-
             if df.empty:
-                print(f"MT5 returned empty DataFrame on attempt {attempt + 1}")
+                print(f"Broker returned empty DataFrame on attempt {attempt + 1}")
                 continue
 
-            print(f"Retrieved {len(df)} bars")
-
-            # --------------------------------------
-            # STEP 2: Save data to CSV after fetch
-            # --------------------------------------
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+            print(f"Retrieved {len(df)} bars from broker")
             save_data_to_csv(df, csv_filename)
-
             return df
 
         except Exception as e:
@@ -89,8 +167,9 @@ def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_d
                 start_date -= timedelta(days=5)
                 print(f"Retrying with new start date: {start_date}")
 
-    print("Failed to load data after all attempts")
+    print("Failed to load data after all attempts.")
     return pd.DataFrame()
+
 
 
 def validate_data_for_backtest(df: pd.DataFrame, timeframe: str = "M15") -> bool:
