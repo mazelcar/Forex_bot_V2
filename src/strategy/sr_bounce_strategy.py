@@ -379,8 +379,8 @@ class SR_Bounce_Strategy:
 
     def open_trade(self, current_segment: pd.DataFrame, balance: float, i: int, symbol: str = "EURUSD") -> Optional["SR_Bounce_Strategy.Trade"]:
         """
-        Enhanced trade opening with FTMO safety checks, multi-symbol awareness,
-        and correlation-based position sizing.
+        Enhanced trade opening that respects FTMO checks and applies correlation-based
+        exposure tiers (block/partial/normal) before finalizing the trade.
         """
         if current_segment.empty:
             return None
@@ -388,10 +388,10 @@ class SR_Bounce_Strategy:
         last_bar = current_segment.iloc[-1]
         current_time = pd.to_datetime(last_bar['time'])
         bar_range = float(last_bar['high']) - float(last_bar['low'])
-        # Approx spread for demonstration
+        # Approximate spread for demonstration
         current_spread = bar_range * 0.1
 
-        # FTMO validation
+        # 1) Check basic FTMO rules (daily limits, spread, etc.)
         can_trade, reason = self._validate_ftmo_rules(
             current_time=current_time,
             spread=current_spread,
@@ -401,50 +401,38 @@ class SR_Bounce_Strategy:
             self.logger.debug(f"[{symbol}] FTMO check failed: {reason}")
             return None
 
-        # Generate signal
+        # 2) Generate signal from strategy logic
         signal = self.generate_signals(current_segment, symbol=symbol)
         if signal["type"] == "NONE":
             return None
 
-        # Volume check
+        # 3) Volume threshold check
         if float(last_bar["tick_volume"]) < self.params["min_volume_threshold"]:
             return None
 
-        # Basic open price
+        # 4) Basic open price & stop distance
         entry_price = float(last_bar["close"])
         stop_loss = self.calculate_stop_loss(signal, current_segment)
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < 0.00001:
             return None
 
-        # Use correlation-based adjustment to final position size
-        # For example, we lower size if correlation with another active symbol is high
-        correlation_factor = 1.0
-        if symbol in self.symbol_correlations:
-            # Find max correlation with any other symbol
-            corr_vals = [abs(v) for k, v in self.symbol_correlations[symbol].items()]
-            if corr_vals:
-                max_corr = max(corr_vals)
-                # If correlation > 0.7, reduce size by 20% as demonstration
-                if max_corr > 0.7:
-                    correlation_factor = 0.8
-
-        # Position sizing with correlation factor
+        # 5) Initial position sizing (before correlation adjustments)
         base_size = self.calculate_position_size(balance, stop_distance)
-        final_size = round(base_size * correlation_factor, 2)
-        if final_size < 0.01:
-            return None
 
+        # 6) Calculate take-profit
         take_profit = self.calculate_take_profit(entry_price, stop_loss)
 
+        # 7) Create a provisional new Trade object
         new_trade = SR_Bounce_Strategy.Trade(
             open_i=i,
             open_time=str(last_bar["time"]),
+            symbol=symbol,             # <--- pass symbol here
             type=signal["type"],
             entry_price=entry_price,
             sl=stop_loss,
             tp=take_profit,
-            size=final_size
+            size=base_size
         )
 
         # Additional fields
@@ -455,7 +443,8 @@ class SR_Bounce_Strategy:
         new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
         new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
 
-        # Track per-symbol
+        # 8) We'll record this provisional trade into the daily_trades dict, but final approval
+        #    depends on cross-pair correlation checks:
         if symbol not in self.daily_trades:
             self.daily_trades[symbol] = []
         self.daily_trades[symbol].append({
@@ -465,8 +454,11 @@ class SR_Bounce_Strategy:
             'exposure': new_trade.size * 10000.0  # naive exposure estimate
         })
 
-        self.logger.debug(f"[{symbol}] Opening trade: {signal['type']} at {entry_price:.5f}, size={final_size} (corr factor={correlation_factor:.2f})")
+        # 9) Return the provisional trade so that the backtest logic can call
+        #    validate_cross_pair_exposure(new_trade, active_trades, balance).
+        #    If that validation fails, the trade won't be opened. If partial, it adjusts new_trade.size.
         return new_trade
+
 
     def exit_trade(self, df_segment: pd.DataFrame, trade: "SR_Bounce_Strategy.Trade", symbol: str = "EURUSD") -> Tuple[bool, float, float]:
         """
@@ -506,30 +498,53 @@ class SR_Bounce_Strategy:
         current_balance: float
     ) -> Tuple[bool, str]:
         """
-        Check combined cross-pair exposure, daily loss, correlation, etc.
-        Example demonstration:
-        - If total open lots across symbols exceed some limit, block new trade.
-        - If correlation is too high and we already have a correlated position, skip.
+        Enhanced correlation-based cross-pair exposure management.
+        - correlation > 0.85: Block new trades on the second pair
+        - correlation 0.70 - 0.85: Partial exposure; the new trade's size is reduced
+        - correlation < 0.70: Normal rules apply
         """
-        # 1) Calculate total open lots
+        # Primary (HIGH) and secondary (MEDIUM) thresholds
+        HIGH_CORR_THRESHOLD = 0.85
+        MEDIUM_CORR_THRESHOLD = 0.70
+
+        # 1) Calculate total open lots across all symbols
         total_open_lots = 0.0
         for sym, trade in active_trades.items():
             if trade is not None:
                 total_open_lots += trade.size
 
-        # 2) If new trade + current trades exceed max allowed
-        if total_open_lots + new_trade.size > 10.0:  # example total lot cap
-            return False, f"Total open lots would exceed limit: {total_open_lots + new_trade.size:.2f}"
+        # 2) Check if adding new_trade would exceed our total lot cap (example 10 lots)
+        if total_open_lots + new_trade.size > 10.0:
+            return (False, f"Total open lots would exceed limit: {total_open_lots + new_trade.size:.2f}")
 
-        # 3) Correlation check:
-        #    If we already have a trade in a symbol highly correlated with the new trade's symbol, skip
-        #    (We already adjusted size, but let's show a second check.)
-        if new_trade.type == "BUY":
-            # Suppose we skip if there's an active SELL on a highly correlated pair
-            pass
+        # 3) Correlation-based logic
+        #    Scan all active trades. If any correlation is above thresholds, apply the rules
+        new_sym = new_trade.symbol
 
-        # Everything good
-        return True, "OK"
+        for sym, open_trade in active_trades.items():
+            if open_trade is None:
+                continue
+            if sym == new_sym:
+                continue  # Skip same symbol
+
+            # Look up correlation from self.symbol_correlations
+            # Use abs in case negative correlation is also critical
+            corr = abs(self.symbol_correlations.get(new_sym, {}).get(sym, 0.0))
+
+            if corr > HIGH_CORR_THRESHOLD:
+                # Block if correlation > 0.85
+                return (False, f"Correlation {corr:.2f} with {sym} > {HIGH_CORR_THRESHOLD} => blocking new trade.")
+            elif corr >= MEDIUM_CORR_THRESHOLD:
+                # Partial exposure scenario if correlation in [0.70, 0.85)
+                # We'll reduce the new trade size to 20% of the originally computed size.
+                adjusted_size = round(new_trade.size * 0.20, 2)
+                if adjusted_size < 0.01:
+                    return (False, f"Partial correlation reduction made size < 0.01 lots => skip trade.")
+                new_trade.size = adjusted_size
+
+        # If we made it here, correlation checks are OK
+        return (True, "OK")
+
 
 
 
@@ -539,6 +554,7 @@ class SR_Bounce_Strategy:
             self,
             open_i: int,
             open_time: str,
+            symbol: str,              # <--- NEW: explicitly store symbol
             type: str,
             entry_price: float,
             sl: float,
@@ -547,6 +563,7 @@ class SR_Bounce_Strategy:
         ):
             self.open_i = open_i
             self.open_time = open_time
+            self.symbol = symbol      # <--- store the symbol in the Trade object
             self.type = type
             self.entry_price = entry_price
             self.sl = sl
@@ -566,10 +583,11 @@ class SR_Bounce_Strategy:
             self.distance_to_level = 0.0
             self.level_type = ""
 
-        def to_dict(self) -> Dict:
+        def to_dict(self) -> dict:
             return {
                 "open_i": self.open_i,
                 "open_time": self.open_time,
+                "symbol": self.symbol,               # <--- included in to_dict
                 "type": self.type,
                 "entry_price": self.entry_price,
                 "sl": self.sl,
@@ -586,6 +604,7 @@ class SR_Bounce_Strategy:
                 "distance_to_level": self.distance_to_level,
                 "level_type": self.level_type,
             }
+
 
     class SignalGenerator:
         """
