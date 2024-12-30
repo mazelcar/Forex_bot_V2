@@ -327,15 +327,41 @@ class SR_Bounce_Strategy:
 
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
         """
-        Fixed position size of 0.5 lots regardless of any market conditions.
-        Maintains strict FTMO-compliant risk management.
+        Risk-based position sizing targeting 1% risk per trade.
+
+        Args:
+            account_balance: Current account balance
+            stop_distance: Distance to stop loss in price terms
+        Returns:
+            float: Position size in lots
         """
-        if account_balance <= 0:
-            self.logger.error(f"Invalid account_balance: {account_balance}")
-            return 0.01
+        try:
+            # Target 1% risk of account
+            risk_amount = account_balance * 0.01
 
-        return 0.5  # Fixed 0.5 lots for every trade
+            # Convert stop distance to pips
+            stop_pips = stop_distance * 10000
 
+            if stop_pips == 0:
+                return 0.0
+
+            # Calculate position size
+            # $10 per pip per lot, so:
+            # risk_amount = stop_pips * $10 * lots
+            # Therefore: lots = risk_amount / (stop_pips * 10)
+            position_size = risk_amount / (stop_pips * 10)
+
+            # Safety limits for FTMO
+            max_position = 5.0  # Maximum 5 lots
+            position_size = min(position_size, max_position)
+            position_size = max(position_size, 0.01)  # Minimum 0.01 lots
+
+            # Round to 2 decimal places
+            return round(position_size, 2)
+
+        except Exception as e:
+            self.logger.error(f"Position sizing error: {str(e)}")
+            return 0.01  # Safe fallback
     def calculate_take_profit(self, entry_price: float, sl: float) -> float:
         """
         If risk_reward=2.0, the distance from entry to SL is multiplied by 2
