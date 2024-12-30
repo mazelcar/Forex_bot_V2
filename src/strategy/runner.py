@@ -65,9 +65,18 @@ def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_d
 
     # If 'days' is specified without explicit start/end, use a fixed reference date
     if days and not start_date and not end_date:
-        end_date = datetime(2023, 1, 1, tzinfo=pytz.UTC)
+        # Use current date as reference, then round down to last completed trading day
+        end_date = datetime.now(pytz.UTC)
+        # If it's weekend or Monday before market open, adjust to last Friday
+        while end_date.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            end_date -= timedelta(days=1)
+        # Round to last completed trading day
+        if end_date.hour < 21:  # If before 21:00 UTC, use previous trading day
+            end_date -= timedelta(days=1)
+        # Set to end of trading day
+        end_date = end_date.replace(hour=21, minute=45, second=0, microsecond=0)
         start_date = end_date - timedelta(days=days)
-        print(f"Date range (Step 1 fix): {start_date} to {end_date}")
+        print(f"Date range: {start_date} to {end_date}")
 
     if not df_local.empty and start_date and end_date:
         local_min = df_local['time'].min()
