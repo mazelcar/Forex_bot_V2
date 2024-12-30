@@ -108,7 +108,8 @@ class SR_Bounce_Strategy:
             valid_levels=self.symbol_levels[self.default_symbol],
             params=self.params,
             logger=self.logger,
-            debug=False
+            debug=False,
+            parent_strategy=self  # <-- Add this
         )
 
 
@@ -285,8 +286,11 @@ class SR_Bounce_Strategy:
             self.logger.error(f"Error updating weekly levels for {symbol}: {str(e)}")
 
 
-    def generate_signals(self, df_segment):
-        return self.signal_generator.generate_signal(df_segment)
+    def generate_signals(self, df_segment, symbol="EURUSD"):
+        """
+        Modified to pass the symbol to the signal generator.
+        """
+        return self.signal_generator.generate_signal(df_segment, symbol)
 
 
     def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
@@ -533,13 +537,26 @@ class SR_Bounce_Strategy:
 
     class SignalGenerator:
         """
-        Inner class for signal generation and bounce detection
+        Inner class for signal generation and bounce detection, now with:
+         - Symbol-aware bounce_registry
+         - Correlation-based signal filtering
+         - Simple conflict check
+         - Minimal volume comparison across pairs
         """
-        def __init__(self, valid_levels, params, logger, debug=False):
+
+        def __init__(self, valid_levels, params, logger, debug=False, parent_strategy=None):
             self.valid_levels = valid_levels
             self.params = params
-            self.logger = get_strategy_logger("SignalGenerator", debug=debug)
+            self.logger = logger
+            self.debug = debug
+
+            # Link back to the parent strategy for correlation data
+            self.parent_strategy = parent_strategy
+
+            # Make the bounce registry symbol-aware:
             self.bounce_registry = {}
+
+            # Moved signal_stats here for clarity
             self.signal_stats = {
                 "volume_filtered": 0,
                 "first_bounce_recorded": 0,
@@ -548,19 +565,58 @@ class SR_Bounce_Strategy:
                 "tolerance_misses": 0
             }
 
-        def generate_signal(self, df_segment: pd.DataFrame) -> Dict[str, Any]:
+        def generate_signal(self, df_segment: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+            """
+            Main signal generation routine with correlation-based filtering and
+            volume comparison across pairs.
+            """
             last_idx = len(df_segment) - 1
             if last_idx < 0:
                 return self._create_no_signal("Segment has no rows")
 
+            # 1) Check correlation filter
+            #    If correlation with any other symbol is above our threshold, skip signals.
+            #    (This is a simplistic approach for demonstration.)
+            correlation_threshold = 0.85
+            correlations = self.parent_strategy.symbol_correlations.get(symbol, {})
+            for other_symbol, corr_val in correlations.items():
+                if abs(corr_val) > correlation_threshold:
+                    # We do a simple skip if correlation is too high
+                    reason = f"Correlation {corr_val:.2f} with {other_symbol} exceeds {correlation_threshold}"
+                    return self._create_no_signal(reason)
+
+            # 2) Basic volume comparison across pairs (optional demonstration)
+            #    If we find another symbol with extremely higher volume in the last bar,
+            #    we skip signals for this symbol. Just a simple demonstration approach.
+            last_bar_volume = float(df_segment.iloc[last_idx]['tick_volume'])
+            for other_symbol, corr_val in correlations.items():
+                if abs(corr_val) > correlation_threshold:
+                    continue  # Already skipped above if correlation too high
+                # Attempt to get the other symbol's last bar volume
+                if other_symbol in self.parent_strategy.symbol_data:
+                    other_df = self.parent_strategy.symbol_data[other_symbol]
+                    if len(other_df) > 0:
+                        # We compare average volume of the last few bars as a naive approach
+                        other_avg_vol = other_df['tick_volume'].tail(5).mean()
+                        current_avg_vol = df_segment['tick_volume'].tail(5).mean()
+
+                        # If other symbol is showing double the volume, skip
+                        if other_avg_vol > (2 * current_avg_vol):
+                            reason = (
+                                f"Volume on {other_symbol} is significantly higher than on {symbol}. "
+                                f"({other_avg_vol:.1f} vs {current_avg_vol:.1f})"
+                            )
+                            return self._create_no_signal(reason)
+
+            # 3) Normal signal logic
             last_bar = df_segment.iloc[last_idx]
 
-            # Volume check with stats tracking
+            # Check if volume is sufficient
             if not self._is_volume_sufficient(df_segment, last_idx):
                 self.signal_stats["volume_filtered"] += 1
                 return self._create_no_signal("Volume too low vs. recent average")
 
-            # Check if bar is bullish/bearish
+            # Evaluate bullish or bearish bar
             close_ = float(last_bar['close'])
             open_ = float(last_bar['open'])
             high_ = float(last_bar['high'])
@@ -575,10 +631,10 @@ class SR_Bounce_Strategy:
                 near_support = bullish and (abs(low_ - lvl) <= tol)
                 near_resistance = bearish and (abs(high_ - lvl) <= tol)
 
-                # Add distance check
                 distance_pips = abs(close_ - lvl) * 10000
-                if distance_pips > 15:  # More than 15 pips away
-                    continue  # Skip this level if too far
+                if distance_pips > 15:
+                    # More than 15 pips away from the level, skip
+                    continue
 
                 # Track near misses
                 if bullish and not near_support and abs(low_ - lvl) <= tol * 2:
@@ -587,14 +643,67 @@ class SR_Bounce_Strategy:
                     self.signal_stats["tolerance_misses"] += 1
 
                 if near_support or near_resistance:
-                    # We have potential bounce
-                    self.logger.debug(f"Potential bounce at level={lvl}, barTime={last_bar['time']}, volume={last_bar['tick_volume']}")
-                    signal = self._process_bounce(lvl, float(last_bar['tick_volume']), last_bar['time'], near_support)
+                    # Potential bounce
+                    self.logger.debug(
+                        f"{symbol} potential bounce at level={lvl}, "
+                        f"time={last_bar['time']}, volume={last_bar['tick_volume']}"
+                    )
+                    signal = self._process_bounce(lvl, float(last_bar['tick_volume']), last_bar['time'],
+                                                  is_support=near_support, symbol=symbol)
                     if signal and signal["type"] != "NONE":
                         self.signal_stats["signals_generated"] += 1
                         return signal
 
             return self._create_no_signal("No bounce off valid levels")
+
+        def _process_bounce(self, level, volume, time, is_support, symbol) -> Optional[Dict[str, Any]]:
+            """
+            Make bounce registry symbol-aware: bounce_registry[symbol][level].
+            Then implement the standard "first bounce / second bounce" logic.
+            """
+            # Ensure symbol key in bounce_registry
+            if symbol not in self.bounce_registry:
+                self.bounce_registry[symbol] = {}
+
+            # If first bounce at level, record it
+            if level not in self.bounce_registry[symbol]:
+                self.bounce_registry[symbol][level] = {
+                    "first_bounce_volume": volume,
+                    "timestamp": time,
+                    "last_trade_time": None
+                }
+                self.signal_stats["first_bounce_recorded"] += 1
+                self.logger.debug(f"[1st bounce] {symbol} volume={volume} at lvl={level}")
+                return self._create_no_signal(f"First bounce recorded for {symbol} at {level}")
+
+            # Check cooldown if already traded
+            if self.bounce_registry[symbol][level].get("last_trade_time"):
+                import pandas as pd
+                last_trade = pd.to_datetime(self.bounce_registry[symbol][level]["last_trade_time"])
+                current_time = pd.to_datetime(time)
+                cooldown_period = pd.Timedelta(hours=2)
+                if current_time - last_trade < cooldown_period:
+                    return self._create_no_signal(f"Level {level} in cooldown for {symbol}")
+
+            # Process second bounce
+            first_vol = self.bounce_registry[symbol][level]["first_bounce_volume"]
+            if volume < first_vol * 0.6:
+                self.signal_stats["second_bounce_low_volume"] += 1
+                return self._create_no_signal("Second bounce volume insufficient")
+
+            bounce_type = "BUY" if is_support else "SELL"
+            reason = f"Valid bounce at {'support' if is_support else 'resistance'} {level} for {symbol}"
+
+            # Update last trade time
+            self.bounce_registry[symbol]["last_trade_time"] = time
+            self.signal_stats["signals_generated"] += 1
+
+            return {
+                "type": bounce_type,
+                "strength": 0.8,
+                "reasons": [reason],
+                "level": level
+            }
 
         def _create_no_signal(self, reason: str) -> Dict[str, Any]:
             self.logger.debug(f"No signal: {reason}")
@@ -603,52 +712,6 @@ class SR_Bounce_Strategy:
                 "strength": 0.0,
                 "reasons": [reason],
                 "level": None
-            }
-
-        def _process_bounce(self, level, volume, time, is_support) -> Optional[Dict[str, Any]]:
-            """
-            Process potential bounce:
-            1. If first bounce at level, record it
-            2. If second bounce, validate and generate signal
-            """
-            if level not in self.bounce_registry:
-                # Mark first bounce
-                self.bounce_registry[level] = {
-                    "first_bounce_volume": volume,
-                    "timestamp": time,
-                    "last_trade_time": None
-                }
-                self.signal_stats["first_bounce_recorded"] += 1
-                self.logger.debug(f"[1st bounce] volume={volume} at lvl={level}")
-                return self._create_no_signal(f"First bounce recorded at {level}")
-
-            # Check cooldown if already traded
-            if self.bounce_registry[level].get("last_trade_time"):
-                last_trade = pd.to_datetime(self.bounce_registry[level]["last_trade_time"])
-                current_time = pd.to_datetime(time)
-                cooldown_period = pd.Timedelta(hours=2)
-
-                if current_time - last_trade < cooldown_period:
-                    return self._create_no_signal(f"Level {level} in cooldown")
-
-            # Process second bounce
-            first_vol = self.bounce_registry[level]["first_bounce_volume"]
-            if volume < first_vol * 0.6:
-                self.signal_stats["second_bounce_low_volume"] += 1
-                return self._create_no_signal("Second bounce volume insufficient")
-
-            bounce_type = "BUY" if is_support else "SELL"
-            reason = f"Valid bounce at {'support' if is_support else 'resistance'} {level}"
-
-            # Update last trade time
-            self.bounce_registry[level]["last_trade_time"] = time
-            self.signal_stats["signals_generated"] += 1
-
-            return {
-                "type": bounce_type,
-                "strength": 0.8,
-                "reasons": [reason],
-                "level": level
             }
 
         def _is_volume_sufficient(
