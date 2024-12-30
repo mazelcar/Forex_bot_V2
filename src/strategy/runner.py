@@ -6,6 +6,7 @@ import os
 import pytz
 
 # Import your local modules
+from src.strategy.data_storage import save_data_to_csv, load_data_from_csv
 from src.core.mt5 import MT5Handler
 from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
 from src.strategy.data_validator import DataValidator
@@ -32,24 +33,37 @@ def get_logger(name="runner", logfile="runner_debug.log"):
 logger = get_logger(name="runner", logfile="runner_debug.log")
 
 
-
-
 def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_date=None, max_retries=3) -> pd.DataFrame:
+    """
+    Enhanced data loader with Step 1 date fix + Step 2 CSV storage.
+    Fetches from broker only if no local CSV or CSV is empty.
+    """
+    # -------------------------------------------------
+    # STEP 2: Check local CSV first, to avoid re-fetching
+    # -------------------------------------------------
+    csv_filename = f"{symbol}_{timeframe}_data.csv"
+    if os.path.exists(csv_filename):
+        print(f"Found local CSV: {csv_filename}, skipping broker fetch...")
+        df_local = load_data_from_csv(csv_filename)
+        if not df_local.empty:
+            print(f"Loaded {len(df_local)} bars from local CSV.")
+            return df_local
+        else:
+            print("Local CSV is empty; proceeding with broker fetch...")
+
     mt5 = MT5Handler(debug=True)
+    print(f"Attempting to load {symbol} {timeframe} data...")
 
-    print(f"Attempting to load {symbol} {timeframe} data...")  # Debug print
-
-    # ----- STEP 1: FIX DATE RANGE (Replace datetime.now() with fixed date) -----
-    # This ensures consistent start/end dates for backtesting.
+    # ----- STEP 1: FIX DATE RANGE (already implemented) -----
     if days and not start_date and not end_date:
-        end_date = datetime(2023, 1, 1, tzinfo=pytz.UTC)  # FIXED date instead of datetime.now()
+        end_date = datetime(2023, 1, 1, tzinfo=pytz.UTC)  # Fixed date instead of datetime.now()
         start_date = end_date - timedelta(days=days)
-        print(f"Date range: {start_date} to {end_date}")  # Debug print
-    # ---------------------------------------------------------------------------
+        print(f"Date range: {start_date} to {end_date}")
+    # --------------------------------------------------------
 
     for attempt in range(max_retries):
         try:
-            print(f"Attempt {attempt + 1} of {max_retries}")  # Debug print
+            print(f"Attempt {attempt + 1} of {max_retries}")
             df = mt5.get_historical_data(symbol, timeframe, start_date, end_date)
 
             if df is None:
@@ -60,16 +74,22 @@ def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_d
                 print(f"MT5 returned empty DataFrame on attempt {attempt + 1}")
                 continue
 
-            print(f"Retrieved {len(df)} bars")  # Debug print
+            print(f"Retrieved {len(df)} bars")
+
+            # --------------------------------------
+            # STEP 2: Save data to CSV after fetch
+            # --------------------------------------
+            save_data_to_csv(df, csv_filename)
+
             return df
 
         except Exception as e:
             print(f"Error on attempt {attempt + 1}: {str(e)}")
             if start_date:
                 start_date -= timedelta(days=5)
-                print(f"Retrying with new start date: {start_date}")  # Debug print
+                print(f"Retrying with new start date: {start_date}")
 
-    print("Failed to load data after all attempts")  # Debug print
+    print("Failed to load data after all attempts")
     return pd.DataFrame()
 
 
