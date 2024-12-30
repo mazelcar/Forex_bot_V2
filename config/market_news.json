@@ -1,0 +1,14 @@
+[
+    {
+      "timestamp": "2024-12-31 13:30:00",
+      "symbol": "EURUSD",
+      "event": "ECB Rate Decision",
+      "impact": "High"
+    },
+    {
+      "timestamp": "2024-12-31 08:30:00",
+      "symbol": "GBPUSD",
+      "event": "UK GDP Release",
+      "impact": "Medium"
+    }
+  ]

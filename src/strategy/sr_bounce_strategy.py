@@ -21,16 +21,17 @@ def get_strategy_logger(name="SR_Bounce_Strategy", debug=False):
         logger.addHandler(ch)
     return logger
 
-
 class SR_Bounce_Strategy:
-
-
     def __init__(
         self,
         config_file: Optional[str] = None,
         logger: logging.Logger = None,
         news_file: str = "config/market_news.json"
     ):
+        """
+        Full constructor that loads configs, logger, multi-symbol structures,
+        and attempts to load market news events from JSON.
+        """
         # Default params
         self.params = {
             "min_touches": 8,
@@ -47,10 +48,14 @@ class SR_Bounce_Strategy:
         # Setup logger
         self.logger = logger or get_strategy_logger()
 
+        # News file management
+        self.news_file = news_file
+        self._load_news_file()  # <-- NEW CALL
+
         # Multi-symbol data structures
-        self.symbol_data = {}  # Store data per symbol
-        self.symbol_levels = {}  # Store S/R levels per symbol
-        self.symbol_bounce_registry = {}  # Store bounces per symbol
+        self.symbol_data = {}
+        self.symbol_levels = {}
+        self.symbol_bounce_registry = {}
 
         # Correlation tracking
         self.symbol_correlations = {
@@ -62,39 +67,32 @@ class SR_Bounce_Strategy:
 
         # FTMO multi-pair limits
         self.ftmo_limits = {
-            "daily_loss_per_pair": 5000,  # $5000 max loss per pair
-            "total_exposure": 25000,      # $25000 max total exposure
-            "correlation_limit": 0.75,    # Max correlation between pairs
-            "max_correlated_positions": 2  # Max number of correlated pairs
+            "daily_loss_per_pair": 5000,
+            "total_exposure": 25000,
+            "correlation_limit": 0.75,
+            "max_correlated_positions": 2
         }
 
         # Default symbol
         self.default_symbol = "EURUSD"
-
-        # Initialize data structures for default symbol
         self.symbol_data[self.default_symbol] = []
         self.symbol_levels[self.default_symbol] = []
         self.symbol_bounce_registry[self.default_symbol] = {}
 
-        # Existing FTMO Parameters - now per symbol
+        # Existing FTMO Parameters
         self.initial_balance = 100000.0
         self.current_balance = self.initial_balance
         self.daily_high_balance = self.initial_balance
-        self.daily_trades = {}  # Now stores trades per symbol
-
-        # FTMO Limits
-        self.daily_drawdown_limit = 0.05  # 5% daily
-        self.max_drawdown_limit = 0.10    # 10% total
-        self.profit_target = 0.10         # 10% profit target
-
-        # Trading rules
+        self.daily_trades = {}
+        self.daily_drawdown_limit = 0.05
+        self.max_drawdown_limit = 0.10
+        self.profit_target = 0.10
         self.max_positions = 3
         self.max_daily_trades = 8
-        self.max_spread = 0.002  # Maximum 2 pip spread
-
+        self.max_spread = 0.002
         self.last_reset = datetime.now().date()
 
-        # Initialize signal generator with symbol awareness
+        # Initialize signal stats
         self.signal_stats = {
             "volume_filtered": 0,
             "first_bounce_recorded": 0,
@@ -104,14 +102,14 @@ class SR_Bounce_Strategy:
         }
 
         # Initialize internal SignalGenerator
+        from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
         self.signal_generator = self.SignalGenerator(
             valid_levels=self.symbol_levels[self.default_symbol],
             params=self.params,
             logger=self.logger,
             debug=False,
-            parent_strategy=self  # <-- Add this
+            parent_strategy=self
         )
-
 
     def _load_config(self, config_file: str):
         try:
@@ -120,6 +118,19 @@ class SR_Bounce_Strategy:
             self.params.update(user_cfg)
         except Exception as e:
             print(f"[WARNING] Unable to load {config_file}: {e}")
+
+    def _load_news_file(self):
+        """
+        Loads news events from the JSON file specified by self.news_file.
+        On error, logs and sets self.news_events = [] so we have no further crash.
+        """
+        try:
+            with open(self.news_file, "r", encoding="utf-8") as f:
+                self.news_events = json.load(f)
+            self.logger.info(f"Loaded {len(self.news_events)} news events from {self.news_file}")
+        except Exception as e:
+            self.logger.error(f"Error loading {self.news_file}: {str(e)}")
+            self.news_events = []
 
     def _validate_ftmo_rules(self, current_time: datetime, spread: float, symbol: str = "EURUSD") -> Tuple[bool, str]:
         """Enhanced FTMO validation logic with multi-pair support"""
