@@ -327,29 +327,14 @@ class SR_Bounce_Strategy:
 
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
         """
-        Basic 1% risk model:
-        - risk_amount = 1% of balance
-        - position_size = risk_amount / (stop_pips * pip_value)
+        Fixed position size of 0.5 lots regardless of any market conditions.
+        Maintains strict FTMO-compliant risk management.
         """
         if account_balance <= 0:
             self.logger.error(f"Invalid account_balance: {account_balance}")
             return 0.01
-        if stop_distance <= 0:
-            self.logger.error(f"Invalid stop_distance: {stop_distance}")
-            return 0.01
 
-        risk_amount = account_balance * 0.01
-        stop_pips = stop_distance * 10000.0
-        pip_value = 10.0  # For EURUSD in 1 standard lot
-
-        position_size = risk_amount / (stop_pips * pip_value)
-        position_size = round(position_size, 2)
-
-        if position_size < 0.01:
-            position_size = 0.01  # ensure min
-
-        self.logger.info(f"Position size calculated: {position_size} lots (Balance={account_balance}, Stop={stop_distance:.5f})")
-        return position_size
+        return 0.5  # Fixed 0.5 lots for every trade
 
     def calculate_take_profit(self, entry_price: float, sl: float) -> float:
         """
