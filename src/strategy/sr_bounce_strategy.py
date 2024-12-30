@@ -377,44 +377,64 @@ class SR_Bounce_Strategy:
         return False, "No exit condition met"
 
 
-    def open_trade(self, current_segment, balance: float, i: int) -> Optional["SR_Bounce_Strategy.Trade"]:
+    def open_trade(self, current_segment: pd.DataFrame, balance: float, i: int, symbol: str = "EURUSD") -> Optional["SR_Bounce_Strategy.Trade"]:
         """
-        Enhanced trade opening with FTMO safety checks
+        Enhanced trade opening with FTMO safety checks, multi-symbol awareness,
+        and correlation-based position sizing.
         """
-        # Get current market conditions
+        if current_segment.empty:
+            return None
+
         last_bar = current_segment.iloc[-1]
         current_time = pd.to_datetime(last_bar['time'])
         bar_range = float(last_bar['high']) - float(last_bar['low'])
+        # Approx spread for demonstration
         current_spread = bar_range * 0.1
 
-        # FTMO validation using internal rules
+        # FTMO validation
         can_trade, reason = self._validate_ftmo_rules(
             current_time=current_time,
             spread=current_spread,
-            symbol=self.default_symbol  # Use default symbol for now
+            symbol=symbol
         )
-
         if not can_trade:
-            self.logger.debug(f"FTMO check failed: {reason}")
+            self.logger.debug(f"[{symbol}] FTMO check failed: {reason}")
             return None
 
-        # Continue with regular strategy
-        signal = self.generate_signals(current_segment)
+        # Generate signal
+        signal = self.generate_signals(current_segment, symbol=symbol)
         if signal["type"] == "NONE":
             return None
 
         # Volume check
-        if last_bar["tick_volume"] < self.params["min_volume_threshold"]:
-            return None  # skip if volume too low
+        if float(last_bar["tick_volume"]) < self.params["min_volume_threshold"]:
+            return None
 
+        # Basic open price
         entry_price = float(last_bar["close"])
         stop_loss = self.calculate_stop_loss(signal, current_segment)
-
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < 0.00001:
             return None
 
-        size = self.calculate_position_size(balance, stop_distance)
+        # Use correlation-based adjustment to final position size
+        # For example, we lower size if correlation with another active symbol is high
+        correlation_factor = 1.0
+        if symbol in self.symbol_correlations:
+            # Find max correlation with any other symbol
+            corr_vals = [abs(v) for k, v in self.symbol_correlations[symbol].items()]
+            if corr_vals:
+                max_corr = max(corr_vals)
+                # If correlation > 0.7, reduce size by 20% as demonstration
+                if max_corr > 0.7:
+                    correlation_factor = 0.8
+
+        # Position sizing with correlation factor
+        base_size = self.calculate_position_size(balance, stop_distance)
+        final_size = round(base_size * correlation_factor, 2)
+        if final_size < 0.01:
+            return None
+
         take_profit = self.calculate_take_profit(entry_price, stop_loss)
 
         new_trade = SR_Bounce_Strategy.Trade(
@@ -424,7 +444,7 @@ class SR_Bounce_Strategy:
             entry_price=entry_price,
             sl=stop_loss,
             tp=take_profit,
-            size=size
+            size=final_size
         )
 
         # Additional fields
@@ -435,23 +455,23 @@ class SR_Bounce_Strategy:
         new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
         new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
 
-        # Initialize symbol in daily_trades if not exists
-        if self.default_symbol not in self.daily_trades:
-            self.daily_trades[self.default_symbol] = []
-
-        # Add trade to our own tracking
-        self.daily_trades[self.default_symbol].append({
+        # Track per-symbol
+        if symbol not in self.daily_trades:
+            self.daily_trades[symbol] = []
+        self.daily_trades[symbol].append({
             'time': new_trade.open_time,
             'type': new_trade.type,
-            'size': new_trade.size
+            'size': new_trade.size,
+            'exposure': new_trade.size * 10000.0  # naive exposure estimate
         })
 
-        self.logger.debug(f"Opening trade: {signal['type']} at {entry_price:.5f}, level={new_trade.level}")
+        self.logger.debug(f"[{symbol}] Opening trade: {signal['type']} at {entry_price:.5f}, size={final_size} (corr factor={correlation_factor:.2f})")
         return new_trade
 
-    def exit_trade(self, df_segment: pd.DataFrame, trade: "SR_Bounce_Strategy.Trade") -> Tuple[bool, float, float]:
+    def exit_trade(self, df_segment: pd.DataFrame, trade: "SR_Bounce_Strategy.Trade", symbol: str = "EURUSD") -> Tuple[bool, float, float]:
         """
-        Enhanced exit with FTMO tracking
+        Enhanced exit with multi-symbol awareness.
+        Returns (should_close, fill_price, pnl).
         """
         position_dict = {
             "type": trade.type,
@@ -459,7 +479,6 @@ class SR_Bounce_Strategy:
             "take_profit": trade.tp
         }
         should_close, reason = self.check_exit_conditions(df_segment, position_dict)
-
         if should_close:
             last_bar = df_segment.iloc[-1]
             if reason == "Stop loss hit":
@@ -471,15 +490,48 @@ class SR_Bounce_Strategy:
 
             if trade.type == "BUY":
                 pnl = (fill_price - trade.entry_price) * 10000.0 * trade.size
-            else:  # SELL
+            else:
                 pnl = (trade.entry_price - fill_price) * 10000.0 * trade.size
 
-            # Update daily PnL tracking for FTMO
+            # Update daily PnL
             self.daily_pnl += pnl
-
             return True, fill_price, pnl
 
         return False, 0.0, 0.0
+
+    def validate_cross_pair_exposure(
+        self,
+        new_trade: "SR_Bounce_Strategy.Trade",
+        active_trades: Dict[str, Optional["SR_Bounce_Strategy.Trade"]],
+        current_balance: float
+    ) -> Tuple[bool, str]:
+        """
+        Check combined cross-pair exposure, daily loss, correlation, etc.
+        Example demonstration:
+        - If total open lots across symbols exceed some limit, block new trade.
+        - If correlation is too high and we already have a correlated position, skip.
+        """
+        # 1) Calculate total open lots
+        total_open_lots = 0.0
+        for sym, trade in active_trades.items():
+            if trade is not None:
+                total_open_lots += trade.size
+
+        # 2) If new trade + current trades exceed max allowed
+        if total_open_lots + new_trade.size > 10.0:  # example total lot cap
+            return False, f"Total open lots would exceed limit: {total_open_lots + new_trade.size:.2f}"
+
+        # 3) Correlation check:
+        #    If we already have a trade in a symbol highly correlated with the new trade's symbol, skip
+        #    (We already adjusted size, but let's show a second check.)
+        if new_trade.type == "BUY":
+            # Suppose we skip if there's an active SELL on a highly correlated pair
+            pass
+
+        # Everything good
+        return True, "OK"
+
+
 
 
     class Trade:

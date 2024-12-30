@@ -12,6 +12,9 @@ from src.strategy.data_validator import DataValidator
 from src.strategy.report_writer import ReportWriter
 from src.strategy.report_writer import analyze_trades
 
+
+
+
 # -------------------------------------------------------
 # Setup logging (Avoid multiple handlers)
 # -------------------------------------------------------
@@ -27,6 +30,8 @@ def get_logger(name="runner", logfile="runner_debug.log"):
     return logger
 
 logger = get_logger(name="runner", logfile="runner_debug.log")
+
+
 
 
 def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_date=None, max_retries=3) -> pd.DataFrame:
@@ -392,6 +397,161 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
         "final_balance": balance
     }
 
+def run_backtest_step5(strategy: SR_Bounce_Strategy, symbol_data_dict: Dict[str, pd.DataFrame], initial_balance=10000.0) -> Dict:
+    """
+    STEP 5: Advanced Trade Management with multi-symbol parallel processing,
+    combined FTMO risk tracking, cross-pair exposure management,
+    and dynamic position sizing based on correlation.
+
+    Args:
+        strategy (SR_Bounce_Strategy): Our trading strategy instance.
+        symbol_data_dict (Dict[str, pd.DataFrame]): A dictionary of symbols -> validated price data.
+        initial_balance (float): Starting account balance for backtest.
+    Returns:
+        Dict with all trades from all symbols and final combined balance.
+    """
+
+    if not symbol_data_dict:
+        logger.warning("No symbol data provided to run_backtest_step5. Returning empty result.")
+        return {"Trades": [], "final_balance": initial_balance}
+
+    # 1) Merge all symbols' data into a single DataFrame with a 'symbol' column
+    #    so we can iterate chronologically across all pairs in parallel.
+    merged_frames = []
+    for sym, df in symbol_data_dict.items():
+        temp = df.copy()
+        temp["symbol"] = sym
+        merged_frames.append(temp)
+    all_data = pd.concat(merged_frames, ignore_index=True).sort_values("time").reset_index(drop=True)
+
+    # Global account equity
+    balance = initial_balance
+
+    # Track open trades per symbol: { "EURUSD": Trade or None, "GBPUSD": Trade or None, ... }
+    active_trades: Dict[str, Optional[strategy.Trade]] = {sym: None for sym in symbol_data_dict.keys()}
+
+    # Master list of closed trades from all symbols
+    closed_trades = []
+
+    # For FTMO tracking across all pairs
+    daily_high_balance = balance
+    current_day = None
+
+    logger.debug("Starting multi-symbol backtest run with advanced trade management...")
+
+    # 2) Main loop: process each bar in chronological order
+    for i in range(len(all_data)):
+        row = all_data.iloc[i]
+        symbol = row["symbol"]
+        # Current bar subset for this symbol only
+        # (We slice up to i+1 but only where symbol matches)
+        symbol_slice = all_data.iloc[: i + 1]
+        symbol_slice = symbol_slice[symbol_slice["symbol"] == symbol]
+
+        if len(symbol_slice) < 5:
+            continue
+
+        current_bar = symbol_slice.iloc[-1]
+        bar_date = pd.to_datetime(current_bar["time"]).date()
+
+        # --- Daily resets for FTMO checks (combined) ---
+        if current_day != bar_date:
+            current_day = bar_date
+            daily_high_balance = balance
+            logger.debug(f"New day: {bar_date} | Reset daily high balance: {balance:.2f}")
+
+        # Update daily high watermark
+        daily_high_balance = max(daily_high_balance, balance)
+
+        # --- Check if trade is active for this symbol ---
+        if active_trades[symbol]:
+            # Evaluate floating PnL
+            trade = active_trades[symbol]
+            current_price = float(current_bar["close"])
+
+            if trade.type == "BUY":
+                floating_pnl = (current_price - trade.entry_price) * 10000.0 * trade.size
+            else:
+                floating_pnl = (trade.entry_price - current_price) * 10000.0 * trade.size
+
+            # Combined daily drawdown check
+            total_daily_drawdown = (balance + floating_pnl - daily_high_balance) / initial_balance
+            if total_daily_drawdown < -strategy.daily_drawdown_limit:
+                # Force close
+                balance += floating_pnl
+                trade.close_i = current_bar.name
+                trade.close_time = current_bar["time"]
+                trade.close_price = current_price
+                trade.pnl = floating_pnl
+                closed_trades.append(trade)
+                logger.warning(f"[{symbol}] Force-closed trade due to daily drawdown at {current_bar['time']}")
+                active_trades[symbol] = None
+                continue
+
+            # Combined max drawdown check
+            total_drawdown = (balance + floating_pnl - initial_balance) / initial_balance
+            if total_drawdown < -strategy.max_drawdown_limit:
+                balance += floating_pnl
+                trade.close_i = current_bar.name
+                trade.close_time = current_bar["time"]
+                trade.close_price = current_price
+                trade.pnl = floating_pnl
+                closed_trades.append(trade)
+                logger.warning(f"[{symbol}] Force-closed trade due to max drawdown at {current_bar['time']}")
+                active_trades[symbol] = None
+                continue
+
+            # Normal exit conditions
+            should_close, fill_price, pnl = strategy.exit_trade(symbol_slice, trade)
+            if should_close:
+                balance += pnl
+                trade.close_i = current_bar.name
+                trade.close_time = current_bar["time"]
+                trade.close_price = fill_price
+                trade.pnl = pnl
+                closed_trades.append(trade)
+                logger.debug(f"[{symbol}] Trade closed: PnL={pnl:.2f}")
+                active_trades[symbol] = None
+
+        # --- Try to open new trade if none active for this symbol ---
+        if active_trades[symbol] is None:
+            new_trade = strategy.open_trade(symbol_slice, balance, i, symbol=symbol)
+            if new_trade:
+                # Check cross-pair exposure & correlation before finalizing
+                can_open, reason = strategy.validate_cross_pair_exposure(new_trade, active_trades, balance)
+                if not can_open:
+                    logger.debug(f"[{symbol}] Cross-pair check failed: {reason}")
+                    continue
+
+                active_trades[symbol] = new_trade
+                logger.debug(f"[{symbol}] New trade opened: {new_trade.type} at {new_trade.entry_price:.5f}")
+
+    # 3) At end: close any remaining trades
+    for symbol, trade in active_trades.items():
+        if trade is not None:
+            # Close at last known price for that symbol
+            sym_df = all_data[all_data["symbol"] == symbol].iloc[-1]
+            last_close = float(sym_df["close"])
+
+            if trade.type == "BUY":
+                pnl = (last_close - trade.entry_price) * 10000.0 * trade.size
+            else:
+                pnl = (trade.entry_price - last_close) * 10000.0 * trade.size
+
+            balance += pnl
+            trade.close_i = sym_df.name
+            trade.close_time = sym_df["time"]
+            trade.close_price = last_close
+            trade.pnl = pnl
+            closed_trades.append(trade)
+            logger.debug(f"[{symbol}] Final trade closed at end: PnL={pnl:.2f}")
+
+    return {
+        "Trades": [t.to_dict() for t in closed_trades],
+        "final_balance": balance
+    }
+
+
 
 # -------------------------------------------------------------
 #  STEP 3: Multi-Symbol Data Management (Modified main)
@@ -399,7 +559,7 @@ def run_backtest(strategy: SR_Bounce_Strategy, df: pd.DataFrame, initial_balance
 def main():
     print("\nStarting backtest with enhanced data validation...")
 
-    # STEP 3: We will load multiple symbols in parallel
+    # We'll load multiple symbols in parallel
     symbols = ["EURUSD", "GBPUSD"]
     timeframe = "M15"
     days = 180
@@ -416,138 +576,104 @@ def main():
             print(f"ERROR: No valid data loaded for {symbol}. Skipping.")
             continue
 
-        # Validate data
         if not validate_data_for_backtest(df, timeframe):
             print(f"ERROR: Validation failed for {symbol}. Skipping.")
             continue
 
-        # Store validated data
         symbol_data_dict[symbol] = df
 
-    # If we don't have at least 2 symbols with data, just proceed with single-symbol logic
-    if len(symbol_data_dict) < 2:
-        print("Warning: Less than 2 symbols loaded. Proceeding with single-symbol backtest on whatever is available...")
-        # Attempt to pick any available symbol
-        if len(symbol_data_dict) == 0:
-            print("No symbols available. Exiting main().")
-            return
-        default_symbol = list(symbol_data_dict.keys())[0]
-        df = symbol_data_dict[default_symbol]
-    else:
-        # If we have both, do a correlation check
-        # For simplicity, let's do a basic time-based merge on "close" for correlation
+    # If we have at least 2 symbols, we'll do a multi-symbol backtest using STEP 5
+    if len(symbol_data_dict) >= 2:
+        # Quick correlation check for demonstration
         df_eu = symbol_data_dict["EURUSD"].copy()
         df_gb = symbol_data_dict["GBPUSD"].copy()
-
-        # Merge on 'time' to align bars
         df_eu.rename(columns={"close": "close_eu"}, inplace=True)
         df_gb.rename(columns={"close": "close_gb"}, inplace=True)
-
         merged = pd.merge(
             df_eu[["time", "close_eu"]],
             df_gb[["time", "close_gb"]],
             on="time",
             how="inner",
-        )
-
-        # Simple correlation
+        ).sort_values("time").reset_index(drop=True)
         corr = merged["close_eu"].corr(merged["close_gb"])
         print(f"\nCorrelation between EURUSD and GBPUSD (close prices): {corr:.4f}")
 
-        # Detect major time gaps across symbols
-        # We'll do a simple time diff approach after merge
-        merged = merged.sort_values("time").reset_index(drop=True)
-        time_diffs = merged["time"].diff().fillna(pd.Timedelta(seconds=0))
-        large_gaps = time_diffs[time_diffs > pd.Timedelta(hours=1)]
-        if not large_gaps.empty:
-            print(f"Found {len(large_gaps)} cross-symbol gap(s) greater than 1 hour:")
-            for idx in large_gaps.index:
-                gap_start = merged.loc[idx-1, 'time'] if idx > 0 else None
-                gap_end = merged.loc[idx, 'time']
-                print(f"Gap from {gap_start} to {gap_end} = {time_diffs[idx]}")
+        # Instantiate the strategy
+        strategy = SR_Bounce_Strategy(config_file=None)
 
-        # For demonstration, we'll backtest only on EURUSD
-        default_symbol = "EURUSD"
+        # Optional: If you want to fetch H1 data for each symbol for weekly S/R:
+        for sym in symbol_data_dict:
+            df_sym = symbol_data_dict[sym]
+            test_start = pd.to_datetime(df_sym['time'].iloc[-1]) - timedelta(days=45)
+            test_end = pd.to_datetime(df_sym['time'].iloc[-1])
+            df_h1 = check_h1_data_or_resample(sym, test_start, test_end)
+            if not df_h1.empty:
+                strategy.update_weekly_levels(df_h1, symbol=sym, weeks=2, weekly_buffer=0.00075)
+
+        # Now run the multi-symbol Step 5 backtest
+        results = run_backtest_step5(strategy, symbol_data_dict, initial_balance=10000.0)
+        trades = results["Trades"]
+        final_balance = results["final_balance"]
+
+        # Analyze trades
+        stats = analyze_trades(trades, 10000.0)
+        print("\n--- MULTI-SYMBOL BACKTEST (Step 5) COMPLETE ---")
+        print(f"Symbols used: {list(symbol_data_dict.keys())}")
+        print(f"Total Trades: {stats['count']}")
+        print(f"Win Rate: {stats['win_rate']:.2f}%")
+        print(f"Profit Factor: {stats['profit_factor']:.2f}")
+        print(f"Max Drawdown: ${stats['max_drawdown']:.2f}")
+        print(f"Total PnL: ${stats['total_pnl']:.2f}")
+        print(f"Final Balance: ${final_balance:.2f}")
+
+    else:
+        # Fallback to single-symbol approach
+        if len(symbol_data_dict) == 0:
+            print("No valid symbols loaded. Exiting main().")
+            return
+
+        default_symbol = next(iter(symbol_data_dict.keys()))
         df = symbol_data_dict[default_symbol]
 
-    # Standard single-pair approach using df
-    train_df, test_df = split_data_for_backtest(df, 0.8)
-    print(f"Train/Test split: {len(train_df)} / {len(test_df)} bars")
+        # Split data
+        train_df, test_df = split_data_for_backtest(df, 0.8)
+        print(f"\nSingle-Symbol Approach => {default_symbol}")
+        print(f"Train/Test split: {len(train_df)} / {len(test_df)}")
 
-    # Prepare H1 data for S/R
-    test_start = pd.to_datetime(test_df['time'].min())
-    test_end = pd.to_datetime(test_df['time'].max())
-    h1_start = test_start - timedelta(days=45)
+        # Optional: fetch H1 for weekly S/R
+        test_start = pd.to_datetime(test_df['time'].min())
+        test_end = pd.to_datetime(test_df['time'].max())
+        h1_start = test_start - timedelta(days=45)
+        df_h1 = check_h1_data_or_resample(default_symbol, h1_start, test_end, threshold=0.90)
 
-    print(f"\nFetching H1 data from {h1_start} to {test_end} for {default_symbol}...")
-    df_h1 = check_h1_data_or_resample(default_symbol, h1_start, test_end, threshold=0.90)
-    if df_h1.empty:
-        print("Failed to load or resample H1 data. Exiting.")
-        return
-    validate_data_for_backtest(df_h1, "H1")
+        strategy = SR_Bounce_Strategy(config_file=None)
+        if not df_h1.empty:
+            strategy.update_weekly_levels(df_h1, symbol=default_symbol, weeks=2, weekly_buffer=0.00075)
 
-    # Instantiate strategy
-    strategy = SR_Bounce_Strategy(config_file=None)
+        # Basic bounces (training)
+        bounce_count = 0
+        for i in range(len(train_df)):
+            current_segment = train_df.iloc[: i + 1]
+            sig = strategy.generate_signals(current_segment)
+            if sig["type"] != "NONE":
+                bounce_count += 1
+        print(f"Training-set bounces detected: {bounce_count}")
 
-    # Update weekly levels using H1
-    strategy.update_weekly_levels(df_h1, weeks=2, weekly_buffer=0.00075)
+        # Single-pair backtest
+        single_result = run_backtest(strategy, test_df, initial_balance=10000.0)
+        sp_trades = single_result["Trades"]
+        sp_final_balance = single_result["final_balance"]
 
-    # Example: check training bounces
-    print("\n--- Checking for bounces in the TRAINING SET ---")
-    bounce_count = 0
-    for i in range(len(train_df)):
-        current_segment = train_df.iloc[: i + 1]
-        sig = strategy.generate_signals(current_segment)
-        if sig["type"] != "NONE":
-            print(f"Bounce found at index={i}, time={current_segment.iloc[-1]['time']}, signal={sig}")
-            bounce_count += 1
-    print(f"Total bounces detected in training set: {bounce_count}")
+        sp_stats = analyze_trades(sp_trades, 10000.0)
+        print("\n--- SINGLE-SYMBOL BACKTEST COMPLETE ---")
+        print(f"Total Trades: {sp_stats['count']}")
+        print(f"Win Rate: {sp_stats['win_rate']:.2f}%")
+        print(f"Profit Factor: {sp_stats['profit_factor']:.2f}")
+        print(f"Max Drawdown: ${sp_stats['max_drawdown']:.2f}")
+        print(f"Total PnL: ${sp_stats['total_pnl']:.2f}")
+        print(f"Final Balance: ${sp_final_balance:.2f}")
 
-    # Run backtest on test_df
-    backtest_result = run_backtest(strategy, test_df, initial_balance=10000.0)
-    trades = backtest_result["Trades"]
-    final_balance = backtest_result["final_balance"]
 
-    stats = analyze_trades(trades, 10000.0)
-
-    print("\n--- BACKTEST COMPLETE (Console Summary) ---")
-    print(f"Total Trades: {stats['count']}")
-    print(f"Win Rate: {stats['win_rate']:.2f}%")
-    print(f"Profit Factor: {stats['profit_factor']:.2f}")
-    print(f"Max Drawdown: ${stats['max_drawdown']:.2f}")
-    print(f"Total PnL: ${stats['total_pnl']:.2f}")
-    print(f"Final Balance: ${final_balance:.2f}")
-
-    # Write report
-    now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = "results"
-    os.makedirs(output_dir, exist_ok=True)
-    report_file = os.path.join(output_dir, f"BACKTEST_REPORT_{default_symbol}_{now_str}.md")
-
-    with ReportWriter(report_file) as writer:
-        writer.write_data_overview(test_df)
-        writer.write_trades_section(trades)
-        writer.write_stats_section(stats, final_balance)
-        writer.write_monthly_breakdown({})
-        writer.write_sr_levels([], [])
-
-    print(f"\nDetailed report written to: {report_file}")
-
-    # Signal Generation Stats printing
-    print("\n--- Signal Generation Stats ---")
-    print(f"Potential signals filtered due to volume: {strategy.signal_generator.signal_stats['volume_filtered']}")
-    print(f"First bounces recorded: {strategy.signal_generator.signal_stats['first_bounce_recorded']}")
-    print(f"Second bounces filtered (low volume): {strategy.signal_generator.signal_stats['second_bounce_low_volume']}")
-    print(f"Signals that missed by tolerance: {strategy.signal_generator.signal_stats['tolerance_misses']}")
-    print(f"Signals generated: {strategy.signal_generator.signal_stats['signals_generated']}")
-
-    # Data Quality Stats
-    validator = DataValidator()
-    df_checked, quality_metrics = validator.validate_and_clean_data(df, timeframe)
-    if quality_metrics.get('true_gaps_detected', 0) > 0:
-        print(f"WARNING: Found {quality_metrics['true_gaps_detected']} unexpected gaps during trading hours")
-    print(f"Weekend gaps: {quality_metrics.get('weekend_gaps', 0)}")
-    print(f"Session gaps: {quality_metrics.get('session_gaps', 0)}")
 
 
 if __name__ == "__main__":
