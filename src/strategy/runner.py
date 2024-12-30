@@ -39,10 +39,13 @@ def load_data(symbol="EURUSD", timeframe="H1", days=None, start_date=None, end_d
 
     print(f"Attempting to load {symbol} {timeframe} data...")  # Debug print
 
+    # ----- STEP 1: FIX DATE RANGE (Replace datetime.now() with fixed date) -----
+    # This ensures consistent start/end dates for backtesting.
     if days and not start_date and not end_date:
-        end_date = datetime.now(pytz.UTC)
+        end_date = datetime(2023, 1, 1, tzinfo=pytz.UTC)  # FIXED date instead of datetime.now()
         start_date = end_date - timedelta(days=days)
         print(f"Date range: {start_date} to {end_date}")  # Debug print
+    # ---------------------------------------------------------------------------
 
     for attempt in range(max_retries):
         try:
