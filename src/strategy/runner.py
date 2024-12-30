@@ -626,6 +626,45 @@ def main():
         print(f"Total PnL: ${stats['total_pnl']:.2f}")
         print(f"Final Balance: ${final_balance:.2f}")
 
+        # STEP 6: Generate comprehensive report
+        from src.strategy.report_writer import ReportWriter
+
+        # Prepare correlation data as dictionary, e.g. from strategy.symbol_correlations or manual
+        correlation_data = {
+            "EURUSD": {"GBPUSD": corr},
+            "GBPUSD": {"EURUSD": corr}
+        }
+
+        # FTMO data (example placeholders)
+        ftmo_data = {
+            "daily_drawdown_limit": 0.05,
+            "max_drawdown_limit": 0.10,
+            "profit_target": 0.10,
+            "current_daily_dd": 0.02,   # example
+            "current_total_dd": 0.03   # example
+        }
+
+        # Dummy placeholders for monthly_data, monthly_levels, weekly_levels if you want them
+        monthly_data = {}
+        monthly_levels = []
+        weekly_levels = []
+
+        report_path = "step6_report.md"
+        with ReportWriter(report_path) as rw:
+            rw.generate_full_report(
+                df_test=symbol_data_dict["EURUSD"],  # or any main symbol for an overview
+                trades=trades,
+                stats=stats,
+                mc_results={},             # if you have MonteCarlo results pass here
+                final_balance=final_balance,
+                monthly_data=monthly_data,
+                monthly_levels=monthly_levels,
+                weekly_levels=weekly_levels,
+                correlation_data=correlation_data,
+                ftmo_data=ftmo_data
+            )
+        print(f"\nStep 6 report generated: {report_path}")
+
     else:
         # Fallback to single-symbol approach
         if len(symbol_data_dict) == 0:
@@ -672,7 +711,6 @@ def main():
         print(f"Max Drawdown: ${sp_stats['max_drawdown']:.2f}")
         print(f"Total PnL: ${sp_stats['total_pnl']:.2f}")
         print(f"Final Balance: ${sp_final_balance:.2f}")
-
 
 
 

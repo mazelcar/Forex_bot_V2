@@ -77,12 +77,13 @@ class ReportWriter:
             self.file_handler.write("No trades were executed.\n\n")
             return
 
-        self.file_handler.write("| # | Open Time | Type | Entry | Level | Level Type | Dist(pips) | Volume | 3-Bar Avg | Hour Avg | Close | PnL |\n")
-        self.file_handler.write("|---|-----------|------|--------|--------|------------|------------|---------|------------|----------|-------|-----|\n")
+        self.file_handler.write("| # | Symbol | Open Time | Type | Entry | Level | Level Type | Dist(pips) | Volume | 3-Bar Avg | Hour Avg | Close | PnL |\n")
+        self.file_handler.write("|---|--------|-----------|------|-------|-------|------------|------------|--------|-----------|----------|-------|-----|\n")
         for i, t in enumerate(trades, start=1):
             dist_pips = t.get('distance_to_level', 0) * 10000  # Convert to pips
+            symbol_label = t.get('symbol', 'N/A')
             self.file_handler.write(
-                f"| {i} | {t['open_time']} | {t['type']} | "
+                f"| {i} | {symbol_label} | {t['open_time']} | {t['type']} | "
                 f"{t['entry_price']:.5f} | {t['level']:.5f} | {t['level_type']} | {dist_pips:.1f} | "
                 f"{t['entry_volume']:.0f} | {t['prev_3_avg_volume']:.0f} | {t['hour_avg_volume']:.0f} | "
                 f"{t['close_price']:.5f} | {t['pnl']:.2f} |\n"
@@ -124,6 +125,62 @@ class ReportWriter:
                 f"Trend@Formation: {level['trend']}\n"
             )
 
+    # ---------------------------
+    # STEP 6 ADDITIONS BELOW
+    # ---------------------------
+
+    def write_multi_symbol_performance(self, trades: List[Dict]):
+        """
+        Breakdown performance by symbol: total trades, PnL, etc.
+        """
+        if not trades:
+            self.file_handler.write("\n## Multi-Symbol Performance\nNo trades found.\n")
+            return
+
+        # Group trades by symbol
+        df = pd.DataFrame(trades)
+        if 'symbol' not in df.columns:
+            self.file_handler.write("\n## Multi-Symbol Performance\n(Symbol field not found)\n")
+            return
+
+        group = df.groupby('symbol')['pnl'].agg(['count', 'sum'])
+        self.file_handler.write("\n## Multi-Symbol Performance\n\n")
+        self.file_handler.write("| Symbol | Trades | Total PnL |\n")
+        self.file_handler.write("|--------|--------|-----------|\n")
+        for idx, row in group.iterrows():
+            self.file_handler.write(f"| {idx} | {row['count']} | {row['sum']:.2f} |\n")
+        self.file_handler.write("\n")
+
+    def write_correlation_report(self, correlation_data: Dict[str, Dict[str, float]]):
+        """
+        Show correlation data among symbols.
+        """
+        if not correlation_data:
+            self.file_handler.write("\n## Correlation Report\nNo correlation data provided.\n")
+            return
+
+        self.file_handler.write("\n## Correlation Report\n\n")
+        for sym, corr_map in correlation_data.items():
+            for other_sym, val in corr_map.items():
+                self.file_handler.write(f"- Correlation {sym} vs {other_sym}: {val:.4f}\n")
+        self.file_handler.write("\n")
+
+    def write_ftmo_section(self, ftmo_data: Dict[str, float]):
+        """
+        Basic FTMO compliance reporting:
+        daily drawdown limit, max drawdown limit, etc.
+        """
+        if not ftmo_data:
+            self.file_handler.write("\n## FTMO Compliance Report\nNo FTMO data provided.\n")
+            return
+
+        self.file_handler.write("\n## FTMO Compliance Report\n")
+        self.file_handler.write(f"- Daily Drawdown Limit: {ftmo_data.get('daily_drawdown_limit', 'N/A')}\n")
+        self.file_handler.write(f"- Max Drawdown Limit: {ftmo_data.get('max_drawdown_limit', 'N/A')}\n")
+        self.file_handler.write(f"- Profit Target: {ftmo_data.get('profit_target', 'N/A')}\n")
+        self.file_handler.write(f"- Current Daily DD: {ftmo_data.get('current_daily_dd', 'N/A')}\n")
+        self.file_handler.write(f"- Current Total DD: {ftmo_data.get('current_total_dd', 'N/A')}\n\n")
+
     def generate_full_report(
         self,
         df_test: pd.DataFrame,
@@ -133,14 +190,26 @@ class ReportWriter:
         final_balance: float,
         monthly_data: Dict,
         monthly_levels: List[Dict],
-        weekly_levels: List[Dict]
+        weekly_levels: List[Dict],
+        correlation_data: Dict[str, Dict[str, float]] = None,
+        ftmo_data: Dict[str, float] = None
     ):
+        """
+        Step 6: Enhanced comprehensive report generation
+        """
         self.write_data_overview(df_test)
         self.write_trades_section(trades)
         self.write_stats_section(stats, final_balance)
-        self.write_monte_carlo_section(mc_results)
+
+        # Optionally, we skip Monte Carlo if not used:
+        # self.write_monte_carlo_section(mc_results)  # if you have that method
+
+        self.write_multi_symbol_performance(trades)
+        self.write_correlation_report(correlation_data)
+        self.write_ftmo_section(ftmo_data)
+
         self.write_monthly_breakdown(monthly_data)
         self.write_sr_levels(monthly_levels, weekly_levels)
+
         self.file_handler.write("\n---\n")
         self.file_handler.write("**End of Report**\n")
-
