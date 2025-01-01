@@ -280,18 +280,28 @@ class SR_Bounce_Strategy:
                 self.logger.warning(f"No weekly levels found for {symbol}")
                 return
 
+            # Ensure all levels are float values
+            w_levels = [float(level) for level in w_levels]
+
             # Update the symbol-specific levels
             self.symbol_levels[symbol] = w_levels
-
-            # For backward compatibility with existing code
-            if symbol == self.default_symbol:
-                self.valid_levels = w_levels
-
             self.logger.info(f"Updated valid levels for {symbol}. Total: {len(w_levels)}")
 
-            # Update signal generator's levels for the current symbol
+            # Update signal generator's levels for current symbol
             if symbol == self.default_symbol:
                 self.signal_generator.valid_levels = w_levels
+            else:
+                signal_gen_attr = f'signal_generator_{symbol}'
+                if not hasattr(self, signal_gen_attr):
+                    setattr(self, signal_gen_attr, self.SignalGenerator(
+                        valid_levels=w_levels,
+                        params=self.params,
+                        logger=self.logger,
+                        debug=False,
+                        parent_strategy=self
+                    ))
+                else:
+                    getattr(self, signal_gen_attr).valid_levels = w_levels
 
         except Exception as e:
             self.logger.error(f"Error updating weekly levels for {symbol}: {str(e)}")
@@ -299,9 +309,24 @@ class SR_Bounce_Strategy:
 
     def generate_signals(self, df_segment, symbol="EURUSD"):
         """
-        Modified to pass the symbol to the signal generator.
+        Modified to use symbol-specific signal generators.
         """
-        return self.signal_generator.generate_signal(df_segment, symbol)
+        if symbol == self.default_symbol:
+            return self.signal_generator.generate_signal(df_segment, symbol)
+
+        signal_gen = getattr(self, f'signal_generator_{symbol}', None)
+        if signal_gen is None:
+            self.logger.warning(f"No signal generator for {symbol}, creating one")
+            signal_gen = self.SignalGenerator(
+                valid_levels=self.symbol_levels.get(symbol, []),
+                params=self.params,
+                logger=self.logger,
+                debug=False,
+                parent_strategy=self
+            )
+            setattr(self, f'signal_generator_{symbol}', signal_gen)
+
+        return signal_gen.generate_signal(df_segment, symbol)
 
 
     def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
@@ -521,51 +546,53 @@ class SR_Bounce_Strategy:
     ) -> Tuple[bool, str]:
         """
         Enhanced correlation-based cross-pair exposure management.
-        - correlation > 0.85: Block new trades on the second pair
-        - correlation 0.70 - 0.85: Partial exposure; the new trade's size is reduced
+        - correlation > 0.95: Block new trades on the second pair
+        - correlation 0.70 - 0.95: Partial exposure; the new trade's size is reduced
         - correlation < 0.70: Normal rules apply
         """
         # Primary (HIGH) and secondary (MEDIUM) thresholds
-        HIGH_CORR_THRESHOLD = 0.85
+        HIGH_CORR_THRESHOLD = 0.95
         MEDIUM_CORR_THRESHOLD = 0.70
+
+        self.logger.info(f"[{new_trade.symbol}] Starting cross-pair validation. Initial size: {new_trade.size}")
 
         # 1) Calculate total open lots across all symbols
         total_open_lots = 0.0
         for sym, trade in active_trades.items():
             if trade is not None:
                 total_open_lots += trade.size
+                self.logger.info(f"Active trade found: {sym} size: {trade.size}")
 
-        # 2) Check if adding new_trade would exceed our total lot cap (example 10 lots)
+        # 2) Check if adding new_trade would exceed our total lot cap
         if total_open_lots + new_trade.size > 10.0:
+            self.logger.warning(f"[{new_trade.symbol}] Total lots would exceed limit: {total_open_lots + new_trade.size:.2f}")
             return (False, f"Total open lots would exceed limit: {total_open_lots + new_trade.size:.2f}")
 
         # 3) Correlation-based logic
-        #    Scan all active trades. If any correlation is above thresholds, apply the rules
         new_sym = new_trade.symbol
 
         for sym, open_trade in active_trades.items():
             if open_trade is None:
                 continue
             if sym == new_sym:
-                continue  # Skip same symbol
+                continue
 
-            # Look up correlation from self.symbol_correlations
-            # Use abs in case negative correlation is also critical
             corr = abs(self.symbol_correlations.get(new_sym, {}).get(sym, 0.0))
+            self.logger.info(f"Correlation between {new_sym} and {sym}: {corr:.4f}")
 
             if corr > HIGH_CORR_THRESHOLD:
-                # Block if correlation > 0.85
+                self.logger.warning(f"[{new_sym}] High correlation block: {corr:.4f} > {HIGH_CORR_THRESHOLD}")
                 return (False, f"Correlation {corr:.2f} with {sym} > {HIGH_CORR_THRESHOLD} => blocking new trade.")
             elif corr >= MEDIUM_CORR_THRESHOLD:
-                # Partial exposure scenario if correlation in [0.70, 0.85)
-                # We'll reduce the new trade size to 20% of the originally computed size.
-                adjusted_size = round(new_trade.size * 0.20, 2)
-                if adjusted_size < 0.01:
+                old_size = new_trade.size
+                new_trade.size = round(new_trade.size * 0.20, 2)
+                self.logger.info(f"[{new_sym}] Reducing size from {old_size} to {new_trade.size} due to correlation {corr:.4f}")
+                if new_trade.size < 0.01:
                     return (False, f"Partial correlation reduction made size < 0.01 lots => skip trade.")
-                new_trade.size = adjusted_size
 
-        # If we made it here, correlation checks are OK
+        self.logger.info(f"[{new_trade.symbol}] Cross-pair validation passed. Final size: {new_trade.size}")
         return (True, "OK")
+
 
 
 
@@ -670,7 +697,7 @@ class SR_Bounce_Strategy:
             # 1) Check correlation filter
             #    If correlation with any other symbol is above our threshold, skip signals.
             #    (This is a simplistic approach for demonstration.)
-            correlation_threshold = 0.85
+            correlation_threshold = 0.95
             correlations = self.parent_strategy.symbol_correlations.get(symbol, {})
             for other_symbol, corr_val in correlations.items():
                 if abs(corr_val) > correlation_threshold:
@@ -685,15 +712,12 @@ class SR_Bounce_Strategy:
             for other_symbol, corr_val in correlations.items():
                 if abs(corr_val) > correlation_threshold:
                     continue  # Already skipped above if correlation too high
-                # Attempt to get the other symbol's last bar volume
                 if other_symbol in self.parent_strategy.symbol_data:
                     other_df = self.parent_strategy.symbol_data[other_symbol]
                     if len(other_df) > 0:
-                        # We compare average volume of the last few bars as a naive approach
+                        # Compare average volumes
                         other_avg_vol = other_df['tick_volume'].tail(5).mean()
                         current_avg_vol = df_segment['tick_volume'].tail(5).mean()
-
-                        # If other symbol is showing double the volume, skip
                         if other_avg_vol > (2 * current_avg_vol):
                             reason = (
                                 f"Volume on {other_symbol} is significantly higher than on {symbol}. "
@@ -736,18 +760,20 @@ class SR_Bounce_Strategy:
                     self.signal_stats["tolerance_misses"] += 1
 
                 if near_support or near_resistance:
-                    # Potential bounce
                     self.logger.debug(
                         f"{symbol} potential bounce at level={lvl}, "
                         f"time={last_bar['time']}, volume={last_bar['tick_volume']}"
                     )
-                    signal = self._process_bounce(lvl, float(last_bar['tick_volume']), last_bar['time'],
-                                                  is_support=near_support, symbol=symbol)
+                    signal = self._process_bounce(
+                        lvl, float(last_bar['tick_volume']), last_bar['time'],
+                        is_support=near_support, symbol=symbol
+                    )
                     if signal and signal["type"] != "NONE":
                         self.signal_stats["signals_generated"] += 1
                         return signal
 
             return self._create_no_signal("No bounce off valid levels")
+
 
         def _process_bounce(self, level, volume, time, is_support, symbol) -> Optional[Dict[str, Any]]:
             """
@@ -758,9 +784,12 @@ class SR_Bounce_Strategy:
             if symbol not in self.bounce_registry:
                 self.bounce_registry[symbol] = {}
 
+            # Convert level to string for dictionary key
+            level_key = str(level)
+
             # If first bounce at level, record it
-            if level not in self.bounce_registry[symbol]:
-                self.bounce_registry[symbol][level] = {
+            if level_key not in self.bounce_registry[symbol]:
+                self.bounce_registry[symbol][level_key] = {
                     "first_bounce_volume": volume,
                     "timestamp": time,
                     "last_trade_time": None
@@ -770,16 +799,15 @@ class SR_Bounce_Strategy:
                 return self._create_no_signal(f"First bounce recorded for {symbol} at {level}")
 
             # Check cooldown if already traded
-            if self.bounce_registry[symbol][level].get("last_trade_time"):
-                import pandas as pd
-                last_trade = pd.to_datetime(self.bounce_registry[symbol][level]["last_trade_time"])
+            if self.bounce_registry[symbol][level_key].get("last_trade_time"):
+                last_trade = pd.to_datetime(self.bounce_registry[symbol][level_key]["last_trade_time"])
                 current_time = pd.to_datetime(time)
                 cooldown_period = pd.Timedelta(hours=2)
                 if current_time - last_trade < cooldown_period:
                     return self._create_no_signal(f"Level {level} in cooldown for {symbol}")
 
             # Process second bounce
-            first_vol = self.bounce_registry[symbol][level]["first_bounce_volume"]
+            first_vol = self.bounce_registry[symbol][level_key]["first_bounce_volume"]
             if volume < first_vol * 0.6:
                 self.signal_stats["second_bounce_low_volume"] += 1
                 return self._create_no_signal("Second bounce volume insufficient")
@@ -787,8 +815,8 @@ class SR_Bounce_Strategy:
             bounce_type = "BUY" if is_support else "SELL"
             reason = f"Valid bounce at {'support' if is_support else 'resistance'} {level} for {symbol}"
 
-            # Update last trade time
-            self.bounce_registry[symbol]["last_trade_time"] = time
+            # Update last trade time at the correct level
+            self.bounce_registry[symbol][level_key]["last_trade_time"] = time
             self.signal_stats["signals_generated"] += 1
 
             return {

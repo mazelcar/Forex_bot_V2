@@ -709,8 +709,12 @@ def main():
         corr = merged["close_eu"].corr(merged["close_gb"])
         print(f"\nCorrelation between EURUSD and GBPUSD (close prices): {corr:.4f}")
 
-        # Instantiate the strategy
+        # Instantiate the strategy first
         strategy = SR_Bounce_Strategy(config_file=None)
+
+        # Then update correlations
+        strategy.symbol_correlations["EURUSD"]["GBPUSD"] = corr
+        strategy.symbol_correlations["GBPUSD"] = {"EURUSD": corr}
 
         # Optional: If you want to fetch H1 data for each symbol for weekly S/R:
         for sym in symbol_data_dict:
