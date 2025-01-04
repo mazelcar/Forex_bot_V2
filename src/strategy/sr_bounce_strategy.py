@@ -428,6 +428,7 @@ class SR_Bounce_Strategy:
         """
         Enhanced trade opening that respects FTMO checks and applies correlation-based
         exposure tiers (block/partial/normal) before finalizing the trade.
+        Also includes entry_reason, level_source, etc.
         """
         if current_segment.empty:
             return None
@@ -474,7 +475,7 @@ class SR_Bounce_Strategy:
         new_trade = SR_Bounce_Strategy.Trade(
             open_i=i,
             open_time=str(last_bar["time"]),
-            symbol=symbol,             # <--- pass symbol here
+            symbol=symbol,
             type=signal["type"],
             entry_price=entry_price,
             sl=stop_loss,
@@ -482,13 +483,31 @@ class SR_Bounce_Strategy:
             size=base_size
         )
 
-        # Additional fields
+        # Existing fields:
         new_trade.level = signal.get('level', 0.0)
         new_trade.level_type = "Support" if signal["type"] == "BUY" else "Resistance"
         new_trade.distance_to_level = abs(entry_price - signal.get('level', entry_price))
         new_trade.entry_volume = float(last_bar['tick_volume'])
         new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
         new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
+
+        # NEW: set entry_reason, combining all signal reasons
+        if "reasons" in signal:
+            new_trade.entry_reason = " + ".join(signal["reasons"])
+        else:
+            new_trade.entry_reason = "No specific reason"
+
+        # NEW: set indicator_snapshot if you want to store some data
+        new_trade.indicator_snapshot = {
+            "3_bar_avg": new_trade.prev_3_avg_volume,
+            "hour_avg": new_trade.hour_avg_volume
+            # Add more if you have RSI, etc.
+        }
+
+        # NEW: example level_source & level_touches (placeholders):
+        # If your logic tracks monthly vs. weekly, store actual info. Otherwise set "Unknown".
+        new_trade.level_source = "Unknown"     # or "Monthly" / "Weekly" / "Intraday"
+        new_trade.level_touches = 0           # or any real calculation of how many times this level was touched
 
         # 8) We'll record this provisional trade into the daily_trades dict, but final approval
         #    depends on cross-pair correlation checks:
@@ -501,9 +520,6 @@ class SR_Bounce_Strategy:
             'exposure': new_trade.size * 10000.0  # naive exposure estimate
         })
 
-        # 9) Return the provisional trade so that the backtest logic can call
-        #    validate_cross_pair_exposure(new_trade, active_trades, balance).
-        #    If that validation fails, the trade won't be opened. If partial, it adjusts new_trade.size.
         return new_trade
 
 
@@ -511,6 +527,7 @@ class SR_Bounce_Strategy:
         """
         Enhanced exit with multi-symbol awareness.
         Returns (should_close, fill_price, pnl).
+        Sets trade.exit_reason if we do close.
         """
         position_dict = {
             "type": trade.type,
@@ -520,6 +537,7 @@ class SR_Bounce_Strategy:
         should_close, reason = self.check_exit_conditions(df_segment, position_dict)
         if should_close:
             last_bar = df_segment.iloc[-1]
+            # Distinguish final fill_price:
             if reason == "Stop loss hit":
                 fill_price = trade.sl
             elif reason == "Take profit hit":
@@ -527,10 +545,14 @@ class SR_Bounce_Strategy:
             else:
                 fill_price = float(last_bar["close"])
 
+            # Calculate PnL
             if trade.type == "BUY":
                 pnl = (fill_price - trade.entry_price) * 10000.0 * trade.size
             else:
                 pnl = (trade.entry_price - fill_price) * 10000.0 * trade.size
+
+            # NEW: store exit_reason in the Trade object
+            trade.exit_reason = reason
 
             # Update daily PnL
             self.daily_pnl += pnl
@@ -603,7 +625,7 @@ class SR_Bounce_Strategy:
             self,
             open_i: int,
             open_time: str,
-            symbol: str,              # <--- NEW: explicitly store symbol
+            symbol: str,
             type: str,
             entry_price: float,
             sl: float,
@@ -612,31 +634,41 @@ class SR_Bounce_Strategy:
         ):
             self.open_i = open_i
             self.open_time = open_time
-            self.symbol = symbol      # <--- store the symbol in the Trade object
+            self.symbol = symbol
             self.type = type
             self.entry_price = entry_price
             self.sl = sl
             self.tp = tp
             self.size = size
 
+            # When the trade is closed:
             self.close_i = None
             self.close_time = None
             self.close_price = None
             self.pnl = 0.0
 
+            # Existing volume fields
             self.entry_volume = 0.0
             self.prev_3_avg_volume = 0.0
             self.hour_avg_volume = 0.0
 
+            # Existing S/R data
             self.level = 0.0
             self.distance_to_level = 0.0
             self.level_type = ""
+
+            # NEW FIELDS:
+            self.entry_reason = ""         # e.g. "Bounced off support + momentum filter"
+            self.exit_reason = ""          # e.g. "Hit trailing stop at 1.2580"
+            self.level_source = ""         # e.g. "Monthly", "Weekly", "Intraday", etc.
+            self.level_touches = 0         # how many times this level was touched historically
+            self.indicator_snapshot = {}   # e.g. { "3_bar_avg": 2000, "hour_avg": 1800, "rsi": 55 }
 
         def to_dict(self) -> dict:
             return {
                 "open_i": self.open_i,
                 "open_time": self.open_time,
-                "symbol": self.symbol,               # <--- included in to_dict
+                "symbol": self.symbol,
                 "type": self.type,
                 "entry_price": self.entry_price,
                 "sl": self.sl,
@@ -652,6 +684,13 @@ class SR_Bounce_Strategy:
                 "level": self.level,
                 "distance_to_level": self.distance_to_level,
                 "level_type": self.level_type,
+
+                # NEW fields included in dictionary:
+                "entry_reason": self.entry_reason,
+                "exit_reason": self.exit_reason,
+                "level_source": self.level_source,
+                "level_touches": self.level_touches,
+                "indicator_snapshot": self.indicator_snapshot
             }
 
 
