@@ -1,5 +1,5 @@
 import logging
-from typing import Dict, List
+from typing import Any, Dict, List
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -61,57 +61,11 @@ class ReportWriter:
         if self.file_handler:
             self.file_handler.close()
 
-    def write_executive_summary(self, trades: List[Dict], stats: Dict, df_test: pd.DataFrame):
-        """Writes executive summary with key metrics and patterns"""
-        self.file_handler.write("# Executive Summary\n\n")
+    ########################################################################
+    #  INSERT OR REPLACE THIS METHOD IN YOUR EXISTING ReportWriter CLASS
+    ########################################################################
+    # ====================== src/strategy/report_writer.py ======================
 
-        # Performance Overview
-        self.file_handler.write("## Performance Overview\n")
-        self.file_handler.write(f"- Total Return: ${stats['total_pnl']:.2f}\n")
-        self.file_handler.write(f"- Number of Trades: {stats['count']}\n")
-        self.file_handler.write(f"- Win Rate: {stats['win_rate']:.2f}%\n")
-        self.file_handler.write(f"- Profit Factor: {stats['profit_factor']:.2f}\n")
-        self.file_handler.write(f"- Maximum Drawdown: ${stats['max_drawdown']:.2f}\n\n")
-
-        # Key Findings
-        self.file_handler.write("## Key Findings\n")
-
-        # Analyze trading frequency
-        df_trades = pd.DataFrame(trades)
-        if not df_trades.empty:
-            df_trades['open_time'] = pd.to_datetime(df_trades['open_time'])
-            df_trades['month'] = df_trades['open_time'].dt.strftime('%Y-%m')
-            monthly_trades = df_trades.groupby('month').size()
-
-            # Find months with no trades
-            all_months = pd.date_range(df_test['time'].min(), df_test['time'].max(), freq='M')
-            all_months = pd.Series(all_months.strftime('%Y-%m'))
-            missing_months = all_months[~all_months.isin(monthly_trades.index)]
-
-            if not missing_months.empty:
-                self.file_handler.write("\n### Notable Periods Without Trading:\n")
-                self.file_handler.write(f"- No trades executed in: {', '.join(missing_months)}\n")
-
-            # Most active trading periods
-            if not monthly_trades.empty:
-                most_active = monthly_trades.idxmax()
-                self.file_handler.write(f"\n- Most active trading month: {most_active} with {monthly_trades[most_active]} trades\n")
-
-        # Analyze win streaks
-        if trades:
-            current_streak = 1
-            max_streak = 1
-            for i in range(1, len(trades)):
-                if (trades[i]['pnl'] > 0 and trades[i-1]['pnl'] > 0) or \
-                   (trades[i]['pnl'] < 0 and trades[i-1]['pnl'] < 0):
-                    current_streak += 1
-                    max_streak = max(max_streak, current_streak)
-                else:
-                    current_streak = 1
-
-            self.file_handler.write(f"- Longest streak of consecutive winning/losing trades: {max_streak}\n\n")
-
-    # Continuing the ReportWriter class...
 
     def write_data_quality_analysis(self, df_test: pd.DataFrame):
         """Analyzes and writes data quality metrics"""
@@ -248,54 +202,178 @@ class ReportWriter:
         self.file_handler.write(f"- Test Start: {df_test.iloc[0]['time'] if not df_test.empty else 'N/A'}\n")
         self.file_handler.write(f"- Test End: {df_test.iloc[-1]['time'] if not df_test.empty else 'N/A'}\n\n")
 
+
     def generate_full_report(
         self,
+        strategy_config: Dict,  # REQUIRED to show "Strategy Overview"
         df_test: pd.DataFrame,
         trades: List[Dict],
         stats: Dict,
-        mc_results: Dict,
         final_balance: float,
         monthly_data: Dict,
         monthly_levels: List[Dict],
         weekly_levels: List[Dict],
         correlation_data: Dict[str, Dict[str, float]] = None,
-        ftmo_data: Dict[str, float] = None
+        ftmo_data: Dict[str, float] = None,
+        mc_results: Dict = None
     ):
-        """Generates comprehensive report with all sections"""
+        """
+        Unified method that prints both:
+        - The 'Strategy Overview' (from your old generate_comprehensive_report)
+        - The 'full report' sections (Data Overview, Trade Analysis, etc.)
+
+        HOW TO USE:
+        1. Copy/paste this into your ReportWriter class in src/strategy/report_writer.py
+        2. In runner.py, call it like this:
+                rw.generate_full_report(
+                    strategy_config=some_dict,
+                    df_test=df,
+                    trades=trades,
+                    stats=stats,
+                    final_balance=balance,
+                    monthly_data=monthly_data,
+                    monthly_levels=monthly_levels,
+                    weekly_levels=weekly_levels,
+                    correlation_data=correlation_data,
+                    ftmo_data=ftmo_data
+                )
+        3. Run `python runner.py` to confirm the output.
+        """
+
+        # ---------------------------
+        # 0) Basic Info & Header
+        # ---------------------------
+        self.file_handler.write("# Comprehensive Backtest Report\n\n")
+        self.file_handler.write(f"**Generated on:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+
+        # -------------------------------------------------
+        # 1) Strategy Overview (from old generate_comprehensive_report)
+        # -------------------------------------------------
+        if strategy_config and "params" in strategy_config and "pair_settings" in strategy_config:
+            self.file_handler.write("## Strategy Overview\n\n")
+
+            # Core Logic
+            self.file_handler.write("### Core Logic\n")
+            self.file_handler.write("- **Type:** Support/Resistance Bounce Strategy\n")
+            self.file_handler.write("- **Timeframes:** Primary M15, H1 for level identification\n")
+            self.file_handler.write(
+                f"- **S/R Validation:** Minimum {strategy_config['params'].get('min_touches', '?')} "
+                "touches required for level validation\n"
+            )
+            self.file_handler.write("- **Price Tolerance per Pair:**\n")
+            for pair, settings in strategy_config.get('pair_settings', {}).items():
+                tol = settings.get('tolerance', 'n/a')
+                self.file_handler.write(f"  * {pair}: {tol} tolerance\n")
+
+            self.file_handler.write("- **Volume Requirements per Pair:**\n")
+            for pair, settings in strategy_config.get('pair_settings', {}).items():
+                vol_req = settings.get('min_volume_threshold', 'n/a')
+                self.file_handler.write(f"  * {pair}: Minimum {vol_req} threshold\n")
+            self.file_handler.write("\n")
+
+            # Entry Conditions
+            self.file_handler.write("### Entry Conditions\n")
+            self.file_handler.write(
+                "1. Price must reach validated S/R level within tolerance bands\n"
+                "2. First bounce requires minimum volume per pair:\n"
+            )
+            for pair, settings in strategy_config.get('pair_settings', {}).items():
+                bounce_vol = settings.get('min_bounce_volume', 'n/a')
+                self.file_handler.write(f"   * {pair}: {bounce_vol} minimum\n")
+
+            self.file_handler.write(
+                "3. Second bounce volume must be >80% of first bounce\n"
+                "4. 2-hour cooldown between trades on same level\n"
+                "5. Cross-pair correlation checks must pass\n\n"
+            )
+
+            # Exit Conditions
+            rr = strategy_config.get('params', {}).get('risk_reward', '?')
+            self.file_handler.write("### Exit Conditions\n")
+            self.file_handler.write(f"1. Take Profit: {rr}R from entry\n")
+            self.file_handler.write("2. Stop Loss: Dynamic, based on recent price action\n")
+            self.file_handler.write("3. Force exit triggers:\n")
+            if 'ftmo_limits' in strategy_config:
+                daily_loss = strategy_config['ftmo_limits'].get('daily_loss_per_pair', '?')
+                total_exposure = strategy_config['ftmo_limits'].get('total_exposure', '?')
+                self.file_handler.write(f"   * Daily drawdown reaches {daily_loss}\n")
+                self.file_handler.write(f"   * Total exposure reaches {total_exposure}\n\n")
+
+            # Risk Management
+            self.file_handler.write("### Risk Management\n")
+            self.file_handler.write("1. Position Sizing: 1% risk per trade\n")
+            if 'ftmo_limits' in strategy_config:
+                corr_lim = strategy_config['ftmo_limits'].get('correlation_limit', '?')
+                max_corr_positions = strategy_config['ftmo_limits'].get('max_correlated_positions', '?')
+                daily_loss_pp = strategy_config['ftmo_limits'].get('daily_loss_per_pair', '?')
+                tot_exposure = strategy_config['ftmo_limits'].get('total_exposure', '?')
+                self.file_handler.write(
+                    f"2. Correlation Management:\n"
+                    f"   * >{corr_lim}: Blocks new trades\n"
+                    f"   * Maximum correlated positions: {max_corr_positions}\n"
+                )
+                self.file_handler.write(
+                    f"3. FTMO Rules:\n"
+                    f"   * {daily_loss_pp} daily loss limit per pair\n"
+                    f"   * {tot_exposure} total exposure limit\n"
+                    "   * Maximum 5 lots per position\n\n"
+                )
+        else:
+            # If no strategy_config provided, just mention no overview
+            self.file_handler.write("## Strategy Overview\n\n(No strategy_config provided, skipping details.)\n\n")
+
+        # -------------------------------------------------
+        # 2) Data Overview
+        # -------------------------------------------------
         self.write_data_overview(df_test)
-        self.write_executive_summary(trades, stats, df_test)
-        self.file_handler.write("\n---\n")
 
+        # -------------------------------------------------
+        # 3) Trade & Stats Analysis
+        # -------------------------------------------------
+        # 3.1 Data Quality
+        self.file_handler.write("\n---\n")
         self.write_data_quality_analysis(df_test)
-        self.file_handler.write("\n---\n")
 
+        # 3.2 Temporal & Market Volatility
+        self.file_handler.write("\n---\n")
         self.write_temporal_analysis(df_test, trades)
-        self.file_handler.write("\n---\n")
 
+        # 3.3 Trade Analysis
+        self.file_handler.write("\n---\n")
         self.write_trade_analysis(trades, df_test)
+
+        # Optionally, if you have MC results you want to show
+        # (We won't do anything with mc_results by default,
+        #  but you can add code here if needed.)
+
+        # -------------------------------------------------
+        # 4) Additional Sections
+        # -------------------------------------------------
         self.file_handler.write("\n---\n")
-
-        # Write original sections
         self.write_trades_section(trades)
-        self.write_stats_section(stats, final_balance)
-        self.write_multi_symbol_performance(trades)
-        if correlation_data:
-            self.write_correlation_report(correlation_data)
-        if ftmo_data:
-            self.write_ftmo_section(ftmo_data)
-        self.write_monthly_breakdown(monthly_data)
-        self.write_sr_levels(monthly_levels, weekly_levels)
-        self.file_handler.write("\n**End of Report**\n")
 
-    def write_stats_section(self, stats: Dict, final_balance: float):
-        """Write basic statistics section"""
-        self.file_handler.write("\n## Stats\n\n")
+        # Summaries
+        self.file_handler.write("\n## Summary Stats\n\n")
         self.file_handler.write(f"- Total Trades: {stats['count']}\n")
         self.file_handler.write(f"- Win Rate: {stats['win_rate']:.2f}%\n")
         self.file_handler.write(f"- Profit Factor: {stats['profit_factor']:.2f}\n")
         self.file_handler.write(f"- Max Drawdown: ${stats['max_drawdown']:.2f}\n")
         self.file_handler.write(f"- Total PnL: ${stats['total_pnl']:.2f}\n")
         self.file_handler.write(f"- Final Balance: ${final_balance:.2f}\n\n")
+
+        # If multi-symbol performance or correlation data
+        self.write_multi_symbol_performance(trades)
+        if correlation_data:
+            self.write_correlation_report(correlation_data)
+        if ftmo_data:
+            self.write_ftmo_section(ftmo_data)
+
+        # If you have monthly/weekly narratives or S/R info
+        self.write_monthly_breakdown(monthly_data)
+        self.write_sr_levels(monthly_levels, weekly_levels)
+
+        self.file_handler.write("\n**End of Comprehensive Backtest Report**\n")
+
 
     def write_multi_symbol_performance(self, trades: List[Dict]):
         """Write per-symbol performance breakdown"""

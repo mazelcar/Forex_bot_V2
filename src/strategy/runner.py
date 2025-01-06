@@ -668,34 +668,70 @@ def run_backtest_step5(strategy: SR_Bounce_Strategy, symbol_data_dict: Dict[str,
 #  STEP 3: Multi-Symbol Data Management (Modified main)
 # -------------------------------------------------------------
 def main():
+    """
+    Main function that orchestrates the backtest using a dictionary-based config.
+    Replace your existing main() in runner.py with this entire method, including
+    the final lines where we call 'generate_full_report(..., strategy_config=...)'
+    to avoid the missing argument error.
+    """
     print("\nStarting backtest with enhanced data validation...")
 
-    # We'll load multiple symbols in parallel
-    symbols = ["EURUSD", "GBPUSD"]
-    timeframe = "M15"
-    days = 180
+    # ----------------------------------------------------------
+    # 1) DEFINE BACKTEST CONFIG HERE
+    # ----------------------------------------------------------
+    backtest_config = {
+        "symbols": ["EURUSD", "GBPUSD"],    # Which pairs to trade
+        "timeframe": "M15",                # Primary timeframe (M15, M5, H1, etc.)
+        "days": 180,                       # How many days of data to load initially
+        "sr_lookback_days": 45,            # Lookback for weekly-level detection
+        "initial_balance": 10000.0,        # Starting balance
+        "report_path": "comprehensive_backtest_report.md",  # Output path for the final report
 
-    # Dictionary to hold validated data for each symbol
+        # These FTMO-like limits get passed to the final report if you want
+        "ftmo_limits": {
+            "daily_drawdown_limit": 0.05,
+            "max_drawdown_limit": 0.10,
+            "profit_target": 0.10,
+            "current_daily_dd": 0.02,
+            "current_total_dd": 0.03
+        }
+    }
+
+    # ----------------------------------------------------------
+    # 2) LOAD & VALIDATE DATA FOR EACH SYMBOL
+    # ----------------------------------------------------------
     symbol_data_dict = {}
-
-    # Load and validate data for each symbol
-    for symbol in symbols:
-        print(f"\nLoading {timeframe} data for {symbol}...")
-        df = load_data(symbol, timeframe, days=days)
+    for symbol in backtest_config["symbols"]:
+        print(f"\nLoading {backtest_config['timeframe']} data for {symbol}...")
+        df = load_data(
+            symbol=symbol,
+            timeframe=backtest_config["timeframe"],
+            days=backtest_config["days"]
+        )
 
         if df.empty:
             print(f"ERROR: No valid data loaded for {symbol}. Skipping.")
             continue
 
-        if not validate_data_for_backtest(df, timeframe):
+        if not validate_data_for_backtest(df, backtest_config["timeframe"]):
             print(f"ERROR: Validation failed for {symbol}. Skipping.")
             continue
 
         symbol_data_dict[symbol] = df
 
-    # If we have at least 2 symbols, we'll do a multi-symbol backtest using STEP 5
-    if len(symbol_data_dict) >= 2:
-        # Quick correlation check for demonstration
+    # If no symbols are valid, we stop.
+    if not symbol_data_dict:
+        print("No valid symbols loaded. Exiting main().")
+        return
+
+    # ----------------------------------------------------------
+    # 3) DETERMINE SINGLE VS MULTI-SYMBOL BACKTEST
+    # ----------------------------------------------------------
+    if len(symbol_data_dict) > 1:
+        # Multi-symbol logic
+        print("\nDetected multiple symbols: ", list(symbol_data_dict.keys()))
+
+        # Quick correlation check
         df_eu = symbol_data_dict["EURUSD"].copy()
         df_gb = symbol_data_dict["GBPUSD"].copy()
         df_eu.rename(columns={"close": "close_eu"}, inplace=True)
@@ -709,29 +745,28 @@ def main():
         corr = merged["close_eu"].corr(merged["close_gb"])
         print(f"\nCorrelation between EURUSD and GBPUSD (close prices): {corr:.4f}")
 
-        # Instantiate the strategy first
+        # Instantiate the strategy
         strategy = SR_Bounce_Strategy(config_file=None)
 
-        # Then update correlations
+        # Update correlation for multi-symbol
         strategy.symbol_correlations["EURUSD"]["GBPUSD"] = corr
         strategy.symbol_correlations["GBPUSD"] = {"EURUSD": corr}
 
-        # Optional: If you want to fetch H1 data for each symbol for weekly S/R:
-        for sym in symbol_data_dict:
-            df_sym = symbol_data_dict[sym]
-            test_start = pd.to_datetime(df_sym['time'].iloc[-1]) - timedelta(days=45)
+        # Optional: fetch H1 data for weekly S/R
+        for sym, df_sym in symbol_data_dict.items():
+            test_start = pd.to_datetime(df_sym['time'].iloc[-1]) - timedelta(days=backtest_config["sr_lookback_days"])
             test_end = pd.to_datetime(df_sym['time'].iloc[-1])
             df_h1 = check_h1_data_or_resample(sym, test_start, test_end)
             if not df_h1.empty:
                 strategy.update_weekly_levels(df_h1, symbol=sym, weeks=2, weekly_buffer=0.00075)
 
-        # Now run the multi-symbol Step 5 backtest
-        results = run_backtest_step5(strategy, symbol_data_dict, initial_balance=10000.0)
+        # Multi-symbol Step 5 backtest
+        results = run_backtest_step5(strategy, symbol_data_dict, initial_balance=backtest_config["initial_balance"])
         trades = results["Trades"]
         final_balance = results["final_balance"]
 
-        # Analyze trades
-        stats = analyze_trades(trades, 10000.0)
+        # Analyze
+        stats = analyze_trades(trades, backtest_config["initial_balance"])
         print("\n--- MULTI-SYMBOL BACKTEST (Step 5) COMPLETE ---")
         print(f"Symbols used: {list(symbol_data_dict.keys())}")
         print(f"Total Trades: {stats['count']}")
@@ -741,36 +776,47 @@ def main():
         print(f"Total PnL: ${stats['total_pnl']:.2f}")
         print(f"Final Balance: ${final_balance:.2f}")
 
-        # STEP 6: Generate comprehensive report
         from src.strategy.report_writer import ReportWriter
 
-        # Prepare correlation data as dictionary, e.g. from strategy.symbol_correlations or manual
+        # We'll define a minimal strategy_config so generate_full_report won't fail:
+        minimal_strategy_config = {
+            "params": {
+                "min_touches": 8,
+                "risk_reward": 3.0
+            },
+            "pair_settings": {
+                "EURUSD": {
+                    "tolerance": 0.0005,
+                    "min_volume_threshold": 1200,
+                    "min_bounce_volume": 1000
+                },
+                "GBPUSD": {
+                    "tolerance": 0.0007,
+                    "min_volume_threshold": 1500,
+                    "min_bounce_volume": 1200
+                }
+            },
+            "ftmo_limits": backtest_config["ftmo_limits"]
+        }
+
         correlation_data = {
             "EURUSD": {"GBPUSD": corr},
             "GBPUSD": {"EURUSD": corr}
         }
+        ftmo_data = backtest_config["ftmo_limits"]
 
-        # FTMO data (example placeholders)
-        ftmo_data = {
-            "daily_drawdown_limit": 0.05,
-            "max_drawdown_limit": 0.10,
-            "profit_target": 0.10,
-            "current_daily_dd": 0.02,   # example
-            "current_total_dd": 0.03   # example
-        }
-
-        # Dummy placeholders for monthly_data, monthly_levels, weekly_levels if you want them
+        # Dummy placeholders for monthly_data, monthly_levels, weekly_levels
         monthly_data = {}
         monthly_levels = []
         weekly_levels = []
 
-        report_path = "step6_report.md"
-        with ReportWriter(report_path) as rw:
+        # Now generate the report (NOTE the strategy_config argument)
+        with ReportWriter(backtest_config["report_path"]) as rw:
             rw.generate_full_report(
-                df_test=symbol_data_dict["EURUSD"],  # or any main symbol for an overview
+                strategy_config=minimal_strategy_config,  # <--- fix: pass a dictionary
+                df_test=symbol_data_dict["EURUSD"],
                 trades=trades,
                 stats=stats,
-                mc_results={},             # if you have MonteCarlo results pass here
                 final_balance=final_balance,
                 monthly_data=monthly_data,
                 monthly_levels=monthly_levels,
@@ -778,33 +824,27 @@ def main():
                 correlation_data=correlation_data,
                 ftmo_data=ftmo_data
             )
-        print(f"\nStep 6 report generated: {report_path}")
+        print(f"\nStep 6 report generated: {backtest_config['report_path']}")
 
     else:
-        # Fallback to single-symbol approach
-        if len(symbol_data_dict) == 0:
-            print("No valid symbols loaded. Exiting main().")
-            return
-
+        # Single-symbol approach
         default_symbol = next(iter(symbol_data_dict.keys()))
         df = symbol_data_dict[default_symbol]
-
-        # Split data
-        train_df, test_df = split_data_for_backtest(df, 0.8)
         print(f"\nSingle-Symbol Approach => {default_symbol}")
+
+        train_df, test_df = split_data_for_backtest(df, 0.8)
         print(f"Train/Test split: {len(train_df)} / {len(test_df)}")
 
-        # Optional: fetch H1 for weekly S/R
         test_start = pd.to_datetime(test_df['time'].min())
         test_end = pd.to_datetime(test_df['time'].max())
-        h1_start = test_start - timedelta(days=45)
+        h1_start = test_start - timedelta(days=backtest_config["sr_lookback_days"])
         df_h1 = check_h1_data_or_resample(default_symbol, h1_start, test_end, threshold=0.90)
 
         strategy = SR_Bounce_Strategy(config_file=None)
         if not df_h1.empty:
             strategy.update_weekly_levels(df_h1, symbol=default_symbol, weeks=2, weekly_buffer=0.00075)
 
-        # Basic bounces (training)
+        # Basic bounce signals (training set)
         bounce_count = 0
         for i in range(len(train_df)):
             current_segment = train_df.iloc[: i + 1]
@@ -813,12 +853,11 @@ def main():
                 bounce_count += 1
         print(f"Training-set bounces detected: {bounce_count}")
 
-        # Single-pair backtest
-        single_result = run_backtest(strategy, test_df, initial_balance=10000.0)
+        single_result = run_backtest(strategy, test_df, initial_balance=backtest_config["initial_balance"])
         sp_trades = single_result["Trades"]
         sp_final_balance = single_result["final_balance"]
 
-        sp_stats = analyze_trades(sp_trades, 10000.0)
+        sp_stats = analyze_trades(sp_trades, backtest_config["initial_balance"])
         print("\n--- SINGLE-SYMBOL BACKTEST COMPLETE ---")
         print(f"Total Trades: {sp_stats['count']}")
         print(f"Win Rate: {sp_stats['win_rate']:.2f}%")
@@ -826,6 +865,27 @@ def main():
         print(f"Max Drawdown: ${sp_stats['max_drawdown']:.2f}")
         print(f"Total PnL: ${sp_stats['total_pnl']:.2f}")
         print(f"Final Balance: ${sp_final_balance:.2f}")
+
+        # If you want a final report in single-symbol mode, do the same approach:
+        # define a minimal_strategy_config or pass an empty dict, then call generate_full_report.
+        # e.g.:
+        #
+        # from src.strategy.report_writer import ReportWriter
+        # with ReportWriter(backtest_config["report_path"]) as rw:
+        #     rw.generate_full_report(
+        #         strategy_config={},  # or a minimal dict
+        #         df_test=test_df,
+        #         trades=sp_trades,
+        #         stats=sp_stats,
+        #         final_balance=sp_final_balance,
+        #         monthly_data={},
+        #         monthly_levels=[],
+        #         weekly_levels=[],
+        #         correlation_data=None,
+        #         ftmo_data=backtest_config["ftmo_limits"]
+        #     )
+        # print(f"\nSingle-symbol report generated: {backtest_config['report_path']}")
+
 
 
 
