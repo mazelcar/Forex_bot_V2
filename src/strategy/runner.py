@@ -746,7 +746,7 @@ def main():
         print(f"\nCorrelation between EURUSD and GBPUSD (close prices): {corr:.4f}")
 
         # Instantiate the strategy
-        strategy = SR_Bounce_Strategy(config_file=None)
+        strategy = SR_Bounce_Strategy()
 
         # Update correlation for multi-symbol
         strategy.symbol_correlations["EURUSD"]["GBPUSD"] = corr
@@ -840,7 +840,7 @@ def main():
         h1_start = test_start - timedelta(days=backtest_config["sr_lookback_days"])
         df_h1 = check_h1_data_or_resample(default_symbol, h1_start, test_end, threshold=0.90)
 
-        strategy = SR_Bounce_Strategy(config_file=None)
+        strategy = SR_Bounce_Strategy()
         if not df_h1.empty:
             strategy.update_weekly_levels(df_h1, symbol=default_symbol, weeks=2, weekly_buffer=0.00075)
 

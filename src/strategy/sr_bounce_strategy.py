@@ -5,59 +5,45 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 import pandas as pd
 
-# from src.strategy.signal_generator import SignalGenerator
-
-
-
-
 def get_strategy_logger(name="SR_Bounce_Strategy", debug=False):
-    logger = logging.getLogger(name)
-    if not logger.handlers:
-        logger.setLevel(logging.INFO if not debug else logging.DEBUG)
-        ch = logging.StreamHandler()
-        ch.setLevel(logging.INFO if not debug else logging.DEBUG)
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-        ch.setFormatter(fmt)
-        logger.addHandler(ch)
-    return logger
+    logger = logging.getLogger(name)                                # Get or create a logger by the specified name.
+    if not logger.handlers:                                         # Only configure if no handlers exist (avoid duplicates).
+        logger.setLevel(logging.INFO if not debug else logging.DEBUG)  # Set level: INFO by default, or DEBUG if debug=True.
+        ch = logging.StreamHandler()                                # Create a stream handler (writes log to console).
+        ch.setLevel(logging.INFO if not debug else logging.DEBUG)   # Same level setting as the logger.
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")  # Define output format.
+        ch.setFormatter(fmt)                                        # Apply the format to the console handler.
+        logger.addHandler(ch)                                       # Attach the handler to the logger.
+    return logger                                                   # Return the configured logger.
 
 class SR_Bounce_Strategy:
     def __init__(
         self,
-        config_file: Optional[str] = None,
-        logger: logging.Logger = None,
-        news_file: str = "config/market_news.json"
+        logger: logging.Logger = None,      # Logger object (if not provided, a default logger will be created)
+        news_file: str = "config/market_news.json"  # Path to a JSON file containing market news
     ):
-        """
-        Full constructor that loads configs, logger, multi-symbol structures,
-        and attempts to load market news events from JSON.
-        """
-        # Default params
-        self.params = {
-            "min_touches": 8,
-            "min_volume_threshold": 1200,
-            "margin_pips": 0.0030,
-            "risk_reward": 3.0,
-            "lookforward_minutes": 30,
+
+        self.logger = logger or get_strategy_logger()  # Use the provided logger or create a default one
+         # Add a pair_settings dict here too:
+        self.pair_settings = {
+            "EURUSD": {
+                "min_volume_threshold": 1200,
+                "risk_reward": 3.0,  # So calculate_take_profit can use it
+            },
+            "GBPUSD": {
+                "min_volume_threshold": 1500,
+                "risk_reward": 3.0,
+            }
         }
 
-        # Load config if specified
-        if config_file:
-            self._load_config(config_file)
+        self.news_file = news_file        # Store the path to the news file
+        self._load_news_file()            # Load market news from JSON file (helps manage risk around news events)
 
-        # Setup logger
-        self.logger = logger or get_strategy_logger()
+        self.symbol_data = {}            # Dict to store historical/dataframes for each symbol
+        self.symbol_levels = {}          # Dict to store identified S/R levels for each symbol
+        self.symbol_bounce_registry = {} # Dict to track bounce information per symbol and level
 
-        # News file management
-        self.news_file = news_file
-        self._load_news_file()  # <-- NEW CALL
-
-        # Multi-symbol data structures
-        self.symbol_data = {}
-        self.symbol_levels = {}
-        self.symbol_bounce_registry = {}
-
-        # Correlation tracking
+        # Store correlations between pairs to manage exposure/correlation-based rules
         self.symbol_correlations = {
             "EURUSD": {
                 "GBPUSD": 0.0,
@@ -65,59 +51,49 @@ class SR_Bounce_Strategy:
             }
         }
 
-        # FTMO multi-pair limits
+        # FTMO-style limits for risk management and trading constraints
         self.ftmo_limits = {
-            "daily_loss_per_pair": 5000,
-            "total_exposure": 25000,
-            "correlation_limit": 0.75,
-            "max_correlated_positions": 2
+            "daily_loss_per_pair": 5000,     # Max daily loss per symbol
+            "total_exposure": 25000,         # Max total account exposure across symbols
+            "correlation_limit": 0.75,       # Max correlation allowed between simultaneous trades
+            "max_correlated_positions": 2    # Max positions allowed if correlation is above a threshold
         }
 
-        # Default symbol
-        self.default_symbol = "EURUSD"
-        self.symbol_data[self.default_symbol] = []
-        self.symbol_levels[self.default_symbol] = []
-        self.symbol_bounce_registry[self.default_symbol] = {}
+        self.default_symbol = "EURUSD"                 # The primary/default symbol
+        self.symbol_data[self.default_symbol] = []     # Initialize data storage for default symbol
+        self.symbol_levels[self.default_symbol] = []   # Initialize levels storage for default symbol
+        self.symbol_bounce_registry[self.default_symbol] = {}  # Init bounce registry for default symbol
 
-        # Existing FTMO Parameters
-        self.initial_balance = 100000.0
+        # FTMO-related trading parameters
+        self.initial_balance = 100000.0   # Starting account balance
         self.current_balance = self.initial_balance
         self.daily_high_balance = self.initial_balance
-        self.daily_trades = {}
-        self.daily_drawdown_limit = 0.05
-        self.max_drawdown_limit = 0.10
-        self.profit_target = 0.10
-        self.max_positions = 3
-        self.max_daily_trades = 8
-        self.max_spread = 0.002
-        self.last_reset = datetime.now().date()
+        self.daily_trades = {}           # Track trades taken each day (symbol-aware)
+        self.daily_drawdown_limit = 0.05 # 5% daily drawdown limit
+        self.max_drawdown_limit = 0.10   # 10% overall drawdown limit
+        self.profit_target = 0.10        # 10% profit target
+        self.max_positions = 3           # Max number of open trades at once
+        self.max_daily_trades = 8        # Max number of trades per day
+        self.max_spread = 0.002          # Maximum spread allowed to open a trade
+        self.last_reset = datetime.now().date()  # Track last reset day for daily limits
 
-        # Initialize signal stats
+        # Track statistics about generated signals and filters applied
         self.signal_stats = {
-            "volume_filtered": 0,
-            "first_bounce_recorded": 0,
-            "second_bounce_low_volume": 0,
-            "signals_generated": 0,
-            "tolerance_misses": 0
+            "volume_filtered": 0,           # Count of signals filtered by volume
+            "first_bounce_recorded": 0,     # Count of first bounces recorded
+            "second_bounce_low_volume": 0,  # Count of second bounces failing volume check
+            "signals_generated": 0,         # Total signals generated
+            "tolerance_misses": 0           # How many times we were near a level but outside tolerance
         }
 
-        # Initialize internal SignalGenerator
-        from src.strategy.sr_bounce_strategy import SR_Bounce_Strategy
+        # Create an internal SignalGenerator for the default symbol, passing relevant settings
         self.signal_generator = self.SignalGenerator(
-            valid_levels=self.symbol_levels[self.default_symbol],
-            params=self.params,
-            logger=self.logger,
-            debug=False,
-            parent_strategy=self
+            valid_levels=self.symbol_levels[self.default_symbol],  # Initial list of S/R levels
+            logger=self.logger,                                    # Logger for debug/info
+            debug=False,                                           # Debug mode off by default
+            parent_strategy=self                                   # Reference to parent for additional data
         )
 
-    def _load_config(self, config_file: str):
-        try:
-            with open(config_file, "r", encoding="utf-8") as f:
-                user_cfg = json.load(f)
-            self.params.update(user_cfg)
-        except Exception as e:
-            print(f"[WARNING] Unable to load {config_file}: {e}")
 
     def _load_news_file(self):
         """
@@ -295,7 +271,6 @@ class SR_Bounce_Strategy:
                 if not hasattr(self, signal_gen_attr):
                     setattr(self, signal_gen_attr, self.SignalGenerator(
                         valid_levels=w_levels,
-                        params=self.params,
                         logger=self.logger,
                         debug=False,
                         parent_strategy=self
@@ -319,7 +294,6 @@ class SR_Bounce_Strategy:
             self.logger.warning(f"No signal generator for {symbol}, creating one")
             signal_gen = self.SignalGenerator(
                 valid_levels=self.symbol_levels.get(symbol, []),
-                params=self.params,
                 logger=self.logger,
                 debug=False,
                 parent_strategy=self
@@ -387,16 +361,18 @@ class SR_Bounce_Strategy:
         except Exception as e:
             self.logger.error(f"Position sizing error: {str(e)}")
             return 0.01  # Safe fallback
-    def calculate_take_profit(self, entry_price: float, sl: float) -> float:
+    def calculate_take_profit(self, entry_price: float, sl: float, symbol: str) -> float:
+
         """
         If risk_reward=2.0, the distance from entry to SL is multiplied by 2
         for the TP distance.
         """
         dist = abs(entry_price - sl)
+        rr = self.pair_settings[symbol]["risk_reward"]  # new approach
         if entry_price > sl:
-            return entry_price + (dist * self.params["risk_reward"])
+            return entry_price + (dist * rr)
         else:
-            return entry_price - (dist * self.params["risk_reward"])
+            return entry_price - (dist * rr)
 
     def check_exit_conditions(self, df_segment: pd.DataFrame, position: Dict[str, Any]) -> Tuple[bool, str]:
         """
@@ -455,7 +431,7 @@ class SR_Bounce_Strategy:
             return None
 
         # 3) Volume threshold check
-        if float(last_bar["tick_volume"]) < self.params["min_volume_threshold"]:
+        if float(last_bar["tick_volume"]) < self.pair_settings[symbol]["min_volume_threshold"]:
             return None
 
         # 4) Basic open price & stop distance
@@ -469,7 +445,7 @@ class SR_Bounce_Strategy:
         base_size = self.calculate_position_size(balance, stop_distance)
 
         # 6) Calculate take-profit
-        take_profit = self.calculate_take_profit(entry_price, stop_loss)
+        take_profit = self.calculate_take_profit(entry_price, stop_loss, symbol)
 
         # 7) Create a provisional new Trade object
         new_trade = SR_Bounce_Strategy.Trade(
@@ -657,12 +633,47 @@ class SR_Bounce_Strategy:
             self.distance_to_level = 0.0
             self.level_type = ""
 
-            # NEW FIELDS:
-            self.entry_reason = ""         # e.g. "Bounced off support + momentum filter"
-            self.exit_reason = ""          # e.g. "Hit trailing stop at 1.2580"
-            self.level_source = ""         # e.g. "Monthly", "Weekly", "Intraday", etc.
-            self.level_touches = 0         # how many times this level was touched historically
-            self.indicator_snapshot = {}   # e.g. { "3_bar_avg": 2000, "hour_avg": 1800, "rsi": 55 }
+            # NEW FIELDS (expanded for clarity):
+            self.entry_reason = ""       # e.g. "Bounced off support + momentum filter"
+            self.exit_reason = ""        # e.g. "Hit trailing stop at 1.2580"
+            self.level_source = ""       # e.g. "Monthly", "Weekly", or "Intraday"
+            self.level_touches = 0       # how many times this level was touched historically
+            self.indicator_snapshot = {} # e.g. {"3_bar_avg": 2000, "hour_avg": 1800}
+
+        def pips(self) -> float:
+            """
+            Returns the difference (in pips) between entry and close prices.
+            A BUY trade has positive pips if close_price > entry_price.
+            A SELL trade has positive pips if close_price < entry_price.
+            """
+            if self.close_price is None:
+                return 0.0
+
+            raw_diff = (
+                (self.close_price - self.entry_price)
+                if self.type == "BUY" else
+                (self.entry_price - self.close_price)
+            )
+            return raw_diff * 10000.0
+
+        def profit(self) -> float:
+            """
+            Recomputes profit in dollars (even if self.pnl is already set).
+            1 pip = $1 per 1.0 lot in this example. Adjust if needed.
+            """
+            return self.pips() * self.size * 1.0
+
+        def holding_time(self) -> pd.Timedelta:
+            """
+            Returns the time difference between open_time and close_time.
+            If trade not closed, returns zero duration.
+            """
+            if not self.close_time:
+                return pd.Timedelta(0, unit="seconds")
+
+            open_t = pd.to_datetime(self.open_time)
+            close_t = pd.to_datetime(self.close_time)
+            return close_t - open_t
 
         def to_dict(self) -> dict:
             return {
@@ -684,14 +695,13 @@ class SR_Bounce_Strategy:
                 "level": self.level,
                 "distance_to_level": self.distance_to_level,
                 "level_type": self.level_type,
-
-                # NEW fields included in dictionary:
                 "entry_reason": self.entry_reason,
                 "exit_reason": self.exit_reason,
                 "level_source": self.level_source,
                 "level_touches": self.level_touches,
                 "indicator_snapshot": self.indicator_snapshot
             }
+
 
 
     class SignalGenerator:
@@ -703,9 +713,8 @@ class SR_Bounce_Strategy:
          - Minimal volume comparison across pairs
         """
 
-        def __init__(self, valid_levels, params, logger, debug=False, parent_strategy=None):
+        def __init__(self, valid_levels, logger, debug=False, parent_strategy=None):
             self.valid_levels = valid_levels
-            self.params = params
             self.logger = logger
             self.debug = debug
 
@@ -733,9 +742,9 @@ class SR_Bounce_Strategy:
                 },
                 "GBPUSD": {
                     "min_touches": 7,
-                    "min_volume_threshold": 1500,  # GBP typically has higher volume
-                    "margin_pips": 0.0035,         # Higher volatility
-                    "tolerance": 0.0007,           # Wider tolerance for higher volatility
+                    "min_volume_threshold": 1500,
+                    "margin_pips": 0.0035,
+                    "tolerance": 0.0007,
                     "min_bounce_volume": 1200
                 }
             }
@@ -778,7 +787,7 @@ class SR_Bounce_Strategy:
             last_bar = df_segment.iloc[last_idx]
 
             # Check if volume is sufficient using pair-specific threshold
-            if float(last_bar["tick_volume"]) < settings["min_volume_threshold"]:
+            if float(last_bar["tick_volume"]) < self.pair_settings[symbol]["min_volume_threshold"]:
                 self.signal_stats["volume_filtered"] += 1
                 return self._create_no_signal("Volume too low vs. threshold")
 
@@ -879,27 +888,3 @@ class SR_Bounce_Strategy:
                 "reasons": [reason],
                 "level": None
             }
-
-        def _is_volume_sufficient(
-            self,
-            df: pd.DataFrame,
-            current_index: int,
-            lookback_bars: int = 20,
-            min_ratio: float = 0.5
-        ) -> bool:
-            """
-            Checks if the current bar's volume is at least `min_ratio`
-            times the average of the last `lookback_bars` volumes.
-            """
-            if current_index < 1:
-                return False
-
-            current_vol = df.iloc[current_index]['tick_volume']
-            start_idx = max(current_index - lookback_bars, 0)
-            recent_vol = df['tick_volume'].iloc[start_idx:current_index]
-
-            if len(recent_vol) == 0:
-                return False
-
-            avg_vol = recent_vol.mean()
-            return current_vol >= (min_ratio * avg_vol)
