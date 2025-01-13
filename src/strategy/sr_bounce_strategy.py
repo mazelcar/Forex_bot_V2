@@ -1,237 +1,246 @@
+# --------------------------------------------------------------
+# sr_bounce_strategy.py
+# --------------------------------------------------------------
 import logging
-from typing import Tuple
-import json
-from typing import List, Optional, Dict, Any
 from datetime import datetime
+from typing import Tuple, List, Optional, Dict, Any
+
 import pandas as pd
 
-def get_strategy_logger(name="SR_Bounce_Strategy", debug=False):
-    logger = logging.getLogger(name)                                # Get or create a logger by the specified name.
-    if not logger.handlers:                                         # Only configure if no handlers exist (avoid duplicates).
-        logger.setLevel(logging.INFO if not debug else logging.DEBUG)  # Set level: INFO by default, or DEBUG if debug=True.
-        ch = logging.StreamHandler()                                # Create a stream handler (writes log to console).
-        ch.setLevel(logging.INFO if not debug else logging.DEBUG)   # Same level setting as the logger.
-        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")  # Define output format.
-        ch.setFormatter(fmt)                                        # Apply the format to the console handler.
-        logger.addHandler(ch)                                       # Attach the handler to the logger.
-    return logger                                                   # Return the configured logger.
+
+def get_strategy_logger(name="SR_Bounce_Strategy", debug=False) -> logging.Logger:
+    """Create or retrieve the strategy logger, avoiding duplicate handlers."""
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG if debug else logging.INFO)
+        ch = logging.StreamHandler()
+        ch.setLevel(logging.DEBUG if debug else logging.INFO)
+        fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+    return logger
+
 
 class SR_Bounce_Strategy:
-    def __init__(
-        self,
-        logger: logging.Logger = None,      # Logger object (if not provided, a default logger will be created)
-        news_file: str = "config/market_news.json"  # Path to a JSON file containing market news
-    ):
+    """
+    Main strategy class responsible for:
+      - FTMO-like rule checks
+      - S/R level detection
+      - Generating signals and trades
+    """
 
-        self.logger = logger or get_strategy_logger()  # Use the provided logger or create a default one
-         # Add a pair_settings dict here too:
+    def __init__(self, logger: logging.Logger = None):
+        """
+        Modified to lower 'risk_reward' from 3.0 to 2.0,
+        so that take-profit is closer and trades have a higher chance to hit TP.
+        """
+        self.logger = logger or get_strategy_logger()
+
+        # Per-symbol settings: lowered risk_reward to 2.0
         self.pair_settings = {
-            "EURUSD": {
-                "min_volume_threshold": 1200,
-                "risk_reward": 3.0,  # So calculate_take_profit can use it
-            },
-            "GBPUSD": {
-                "min_volume_threshold": 1500,
-                "risk_reward": 3.0,
-            }
+            "EURUSD": {"min_volume_threshold": 1200, "risk_reward": 2.0},
+            "GBPUSD": {"min_volume_threshold": 1500, "risk_reward": 2.0},
         }
 
-        self.news_file = news_file        # Store the path to the news file
-        self._load_news_file()            # Load market news from JSON file (helps manage risk around news events)
+        # Data storage
+        self.symbol_data = {}
+        self.symbol_levels = {}
+        self.symbol_bounce_registry = {}
 
-        self.symbol_data = {}            # Dict to store historical/dataframes for each symbol
-        self.symbol_levels = {}          # Dict to store identified S/R levels for each symbol
-        self.symbol_bounce_registry = {} # Dict to track bounce information per symbol and level
-
-        # Store correlations between pairs to manage exposure/correlation-based rules
+        # Correlation data
         self.symbol_correlations = {
-            "EURUSD": {
-                "GBPUSD": 0.0,
-                "USDJPY": 0.0
-            }
+            "EURUSD": {"GBPUSD": 0.0, "USDJPY": 0.0},
         }
 
-        # FTMO-style limits for risk management and trading constraints
+        # FTMO-like limits
         self.ftmo_limits = {
-            "daily_loss_per_pair": 5000,     # Max daily loss per symbol
-            "total_exposure": 25000,         # Max total account exposure across symbols
-            "correlation_limit": 0.75,       # Max correlation allowed between simultaneous trades
-            "max_correlated_positions": 2    # Max positions allowed if correlation is above a threshold
+            "daily_loss_per_pair": 5000,
+            "total_exposure": 25000,
+            "correlation_limit": 0.75,
+            "max_correlated_positions": 2,
         }
 
-        self.default_symbol = "EURUSD"                 # The primary/default symbol
-        self.symbol_data[self.default_symbol] = []     # Initialize data storage for default symbol
-        self.symbol_levels[self.default_symbol] = []   # Initialize levels storage for default symbol
-        self.symbol_bounce_registry[self.default_symbol] = {}  # Init bounce registry for default symbol
+        # Default symbol
+        self.default_symbol = "EURUSD"
+        self.symbol_data[self.default_symbol] = pd.DataFrame()
+        self.symbol_levels[self.default_symbol] = []
+        self.symbol_bounce_registry[self.default_symbol] = {}
 
-        # FTMO-related trading parameters
-        self.initial_balance = 100000.0   # Starting account balance
+        # Account/trade-limiting parameters
+        self.initial_balance = 100000.0
         self.current_balance = self.initial_balance
         self.daily_high_balance = self.initial_balance
-        self.daily_trades = {}           # Track trades taken each day (symbol-aware)
-        self.daily_drawdown_limit = 0.05 # 5% daily drawdown limit
-        self.max_drawdown_limit = 0.10   # 10% overall drawdown limit
-        self.profit_target = 0.10        # 10% profit target
-        self.max_positions = 3           # Max number of open trades at once
-        self.max_daily_trades = 8        # Max number of trades per day
-        self.max_spread = 0.002          # Maximum spread allowed to open a trade
-        self.last_reset = datetime.now().date()  # Track last reset day for daily limits
+        self.daily_drawdown_limit = 0.05
+        self.max_drawdown_limit = 0.10
+        self.profit_target = 0.10
+        self.max_positions = 3
+        self.max_daily_trades = 8
+        self.max_spread = 0.002
+        self.last_reset = datetime.now().date()
+        self.daily_trades = {}
 
-        # Track statistics about generated signals and filters applied
+        # Track some signal stats
         self.signal_stats = {
-            "volume_filtered": 0,           # Count of signals filtered by volume
-            "first_bounce_recorded": 0,     # Count of first bounces recorded
-            "second_bounce_low_volume": 0,  # Count of second bounces failing volume check
-            "signals_generated": 0,         # Total signals generated
-            "tolerance_misses": 0           # How many times we were near a level but outside tolerance
+            "volume_filtered": 0,
+            "first_bounce_recorded": 0,
+            "second_bounce_low_volume": 0,
+            "signals_generated": 0,
+            "tolerance_misses": 0,
         }
 
-        # Create an internal SignalGenerator for the default symbol, passing relevant settings
+        # Create a default SignalGenerator for self.default_symbol
         self.signal_generator = self.SignalGenerator(
-            valid_levels=self.symbol_levels[self.default_symbol],  # Initial list of S/R levels
-            logger=self.logger,                                    # Logger for debug/info
-            debug=False,                                           # Debug mode off by default
-            parent_strategy=self                                   # Reference to parent for additional data
+            valid_levels=self.symbol_levels[self.default_symbol],
+            logger=self.logger,
+            debug=False,
+            parent_strategy=self,
         )
 
-
-    def _load_news_file(self):
+    # -------------------------------------------------------------------------
+    # FTMO Checks
+    # -------------------------------------------------------------------------
+    def _validate_ftmo_rules(
+        self, current_time: datetime, spread: float, symbol: str = "EURUSD"
+    ) -> Tuple[bool, str]:
         """
-        Loads news events from the JSON file specified by self.news_file.
-        On error, logs and sets self.news_events = [] so we have no further crash.
+        Check multiple FTMO-like rules:
+          1) Daily trade limit
+          2) Total exposure
+          3) Correlation limit
+          4) Daily loss limit
+          5) Spread limit
         """
-        try:
-            with open(self.news_file, "r", encoding="utf-8") as f:
-                self.news_events = json.load(f)
-            self.logger.info(f"Loaded {len(self.news_events)} news events from {self.news_file}")
-        except Exception as e:
-            self.logger.error(f"Error loading {self.news_file}: {str(e)}")
-            self.news_events = []
+        trade_date = current_time.date()
 
-    def _validate_ftmo_rules(self, current_time: datetime, spread: float, symbol: str = "EURUSD") -> Tuple[bool, str]:
-        """Enhanced FTMO validation logic with multi-pair support"""
-        trade_date = pd.to_datetime(current_time).date()
-
-        # Reset counters if needed
+        # Reset daily counters if needed
         if trade_date != self.last_reset:
-            self.daily_trades = {}  # Reset as dictionary for all symbols
+            self.daily_trades = {}
             self.last_reset = trade_date
-            self.daily_pnl = 0.0
 
-        # Initialize symbol tracking if needed
         if symbol not in self.daily_trades:
             self.daily_trades[symbol] = []
 
-        # Check daily trade count for this symbol
-        daily_trades_count = len([t for t in self.daily_trades.get(symbol, [])
-                                if pd.to_datetime(t['time']).date() == trade_date])
+        # 1) Check daily trade limit
+        passed, reason = self._check_daily_trade_limit(symbol, trade_date)
+        if not passed:
+            return False, reason
 
-        if daily_trades_count >= self.max_daily_trades:
-            return False, f"Daily trade limit reached for {symbol} ({daily_trades_count}/{self.max_daily_trades})"
+        # 2) Check total exposure
+        passed, reason = self._check_exposure_limit(symbol, trade_date)
+        if not passed:
+            return False, reason
 
-        # Calculate total exposure across all symbols
-        total_exposure = sum(
-            abs(t.get('exposure', 0))
-            for sym in self.daily_trades
-            for t in self.daily_trades[sym]
-            if pd.to_datetime(t['time']).date() == trade_date
-        )
+        # 3) Check correlation
+        passed, reason = self._check_correlation_limit(symbol)
+        if not passed:
+            return False, reason
 
-        if total_exposure >= self.ftmo_limits["total_exposure"]:
-            return False, f"Total exposure limit reached ({total_exposure}/{self.ftmo_limits['total_exposure']})"
+        # 4) Check daily loss limit
+        passed, reason = self._check_daily_loss_limit(symbol, trade_date)
+        if not passed:
+            return False, reason
 
-        # Check correlation limits
-        active_pairs = [sym for sym in self.daily_trades if self.daily_trades[sym]]
-        if symbol in self.symbol_correlations:
-            for other_symbol in active_pairs:
-                if other_symbol in self.symbol_correlations[symbol]:
-                    correlation = abs(self.symbol_correlations[symbol][other_symbol])
-                    if correlation > self.ftmo_limits["correlation_limit"]:
-                        return False, f"Correlation too high between {symbol} and {other_symbol}"
-
-        # Check daily loss limit per symbol
-        symbol_daily_loss = abs(min(0, sum(
-            t.get('pnl', 0) for t in self.daily_trades.get(symbol, [])
-            if pd.to_datetime(t['time']).date() == trade_date
-        )))
-
-        if symbol_daily_loss >= self.ftmo_limits["daily_loss_per_pair"]:
-            return False, f"Daily loss limit reached for {symbol}"
-
+        # 5) Check spread
         if spread > self.max_spread:
             return False, f"Spread too high for {symbol}: {spread:.5f}"
 
         return True, "Trade validated"
 
+    def _check_daily_trade_limit(
+        self, symbol: str, trade_date: datetime.date
+    ) -> Tuple[bool, str]:
+        daily_trades_count = len(
+            [
+                t
+                for t in self.daily_trades.get(symbol, [])
+                if pd.to_datetime(t["time"]).date() == trade_date
+            ]
+        )
+        if daily_trades_count >= self.max_daily_trades:
+            return (
+                False,
+                f"Daily trade limit reached for {symbol} ({daily_trades_count}/{self.max_daily_trades})",
+            )
+        return True, ""
 
+    def _check_exposure_limit(
+        self, symbol: str, trade_date: datetime.date
+    ) -> Tuple[bool, str]:
+        total_exposure = sum(
+            abs(t.get("exposure", 0))
+            for sym in self.daily_trades
+            for t in self.daily_trades[sym]
+            if pd.to_datetime(t["time"]).date() == trade_date
+        )
+        if total_exposure >= self.ftmo_limits["total_exposure"]:
+            return (
+                False,
+                f"Total exposure limit reached ({total_exposure}/{self.ftmo_limits['total_exposure']})",
+            )
+        return True, ""
+
+    def _check_correlation_limit(self, symbol: str) -> Tuple[bool, str]:
+        active_pairs = [sym for sym in self.daily_trades if self.daily_trades[sym]]
+        if symbol not in self.symbol_correlations:
+            return True, ""  # No correlation data for this symbol
+        for other_symbol in active_pairs:
+            corr_val = abs(self.symbol_correlations[symbol].get(other_symbol, 0.0))
+            if corr_val > self.ftmo_limits["correlation_limit"]:
+                return (
+                    False,
+                    f"Correlation too high between {symbol} and {other_symbol}",
+                )
+        return True, ""
+
+    def _check_daily_loss_limit(
+        self, symbol: str, trade_date: datetime.date
+    ) -> Tuple[bool, str]:
+        symbol_daily_loss = abs(
+            min(
+                0,
+                sum(
+                    t.get("pnl", 0)
+                    for t in self.daily_trades.get(symbol, [])
+                    if pd.to_datetime(t["time"]).date() == trade_date
+                ),
+            )
+        )
+        if symbol_daily_loss >= self.ftmo_limits["daily_loss_per_pair"]:
+            return False, f"Daily loss limit reached for {symbol}"
+        return True, ""
+
+    # -------------------------------------------------------------------------
+    # S/R Identification
+    # -------------------------------------------------------------------------
     def identify_sr_weekly(
         self,
         df_h1: pd.DataFrame,
         symbol: str = "EURUSD",
         weeks: int = 12,
         chunk_size: int = 24,
-        weekly_buffer: float = 0.0003
+        weekly_buffer: float = 0.0003,
     ) -> List[float]:
         """
-        Identify significant S/R levels from H1 data over the last `weeks` weeks.
-        Now symbol-aware and includes correlation checks.
+        Identify significant S/R levels from H1 data over the last `weeks` weeks,
+        grouped into chunks of `chunk_size` bars, with a small merging buffer.
         """
         try:
             if df_h1.empty:
                 self.logger.error(f"Empty dataframe in identify_sr_weekly for {symbol}")
                 return []
 
-            # Filter to last `weeks` weeks
-            last_time = pd.to_datetime(df_h1["time"].max())
-            cutoff_time = last_time - pd.Timedelta(days=weeks * 7)
-            recent_df = df_h1[df_h1["time"] >= cutoff_time].copy()
-            recent_df.sort_values("time", inplace=True)
-
-            self.logger.info(f"Analyzing {symbol} data from {recent_df['time'].min()} to {recent_df['time'].max()}")
-
+            recent_df = self._filter_recent_weeks(df_h1, weeks)
             if recent_df.empty:
-                self.logger.warning(f"No data after filtering for recent weeks for {symbol}")
+                self.logger.warning(f"No data after filtering for {weeks} weeks: {symbol}")
                 return []
 
-            # Calculate average volume for significance
-            avg_volume = recent_df['tick_volume'].mean()
-            volume_threshold = avg_volume * 1.5
+            volume_threshold = self._compute_volume_threshold(recent_df)
+            potential_levels = self._collect_potential_levels(
+                recent_df, chunk_size, volume_threshold, symbol
+            )
+            merged_levels = self._merge_close_levels(potential_levels, weekly_buffer)
 
-            potential_levels = []
-            # Slide window of chunk_size bars
-            for i in range(0, len(recent_df), chunk_size):
-                window = recent_df.iloc[i:i + chunk_size]
-                if len(window) < chunk_size / 2:  # skip small windows
-                    continue
-
-                # High & Low with volume validation
-                high = float(window['high'].max())
-                low = float(window['low'].min())
-
-                high_volume = float(window.loc[window['high'] == high, 'tick_volume'].max())
-                low_volume = float(window.loc[window['low'] == low, 'tick_volume'].max())
-
-                # Add levels if volume significant
-                if high_volume > volume_threshold:
-                    potential_levels.append(high)
-                    self.logger.debug(f"{symbol} High level found at {high:.5f} with volume {high_volume}")
-
-                if low_volume > volume_threshold:
-                    potential_levels.append(low)
-                    self.logger.debug(f"{symbol} Low level found at {low:.5f} with volume {low_volume}")
-
-            # Sort & merge nearby levels
-            potential_levels = sorted(set(potential_levels))
-            merged_levels = []
-            for lvl in potential_levels:
-                if not merged_levels or abs(lvl - merged_levels[-1]) > weekly_buffer:
-                    merged_levels.append(lvl)
-                else:
-                    merged_levels[-1] = (merged_levels[-1] + lvl) / 2.0
-
-            # Store in symbol_levels dictionary
             self.symbol_levels[symbol] = merged_levels
-
             self.logger.info(f"Identified {len(merged_levels)} valid S/R levels for {symbol}")
             return merged_levels
 
@@ -239,215 +248,216 @@ class SR_Bounce_Strategy:
             self.logger.error(f"Error in identify_sr_weekly for {symbol}: {str(e)}")
             return []
 
+    def _filter_recent_weeks(self, df: pd.DataFrame, weeks: int) -> pd.DataFrame:
+        last_time = pd.to_datetime(df["time"].max())
+        cutoff_time = last_time - pd.Timedelta(days=weeks * 7)
+        recent_df = df[df["time"] >= cutoff_time].copy()
+        recent_df.sort_values("time", inplace=True)
+        return recent_df
 
-    def update_weekly_levels(self, df_h1, symbol: str = "EURUSD", weeks: int = 3, weekly_buffer: float = 0.00060):
-        """
-        Update the strategy's valid levels using weekly S/R from identify_sr_weekly.
-        Now symbol-aware.
-        """
+    def _compute_volume_threshold(self, recent_df: pd.DataFrame) -> float:
+        avg_volume = recent_df["tick_volume"].mean()
+        return avg_volume * 1.5
+
+    def _collect_potential_levels(
+        self,
+        recent_df: pd.DataFrame,
+        chunk_size: int,
+        volume_threshold: float,
+        symbol: str,
+    ) -> List[float]:
+        potential_levels = []
+        for i in range(0, len(recent_df), chunk_size):
+            window = recent_df.iloc[i : i + chunk_size]
+            if len(window) < chunk_size / 2:
+                continue
+            high = float(window["high"].max())
+            low = float(window["low"].min())
+            high_volume = float(window.loc[window["high"] == high, "tick_volume"].max())
+            low_volume = float(window.loc[window["low"] == low, "tick_volume"].max())
+
+            # Check volumes relative to threshold
+            if high_volume > volume_threshold:
+                potential_levels.append(high)
+                self.logger.debug(f"{symbol} High level found {high:.5f} vol {high_volume}")
+            if low_volume > volume_threshold:
+                potential_levels.append(low)
+                self.logger.debug(f"{symbol} Low level found {low:.5f} vol {low_volume}")
+
+        potential_levels = sorted(set(potential_levels))
+        return potential_levels
+
+    def _merge_close_levels(
+        self, potential_levels: List[float], buffer_val: float
+    ) -> List[float]:
+        merged = []
+        for lvl in potential_levels:
+            if not merged or abs(lvl - merged[-1]) > buffer_val:
+                merged.append(lvl)
+            else:
+                # Merge close levels into their midpoint
+                merged[-1] = (merged[-1] + lvl) / 2.0
+        return merged
+
+    def update_weekly_levels(
+        self, df_h1: pd.DataFrame, symbol: str = "EURUSD", weeks: int = 3, weekly_buffer: float = 0.00060
+    ):
+        """Update or create weekly S/R levels for the given symbol, from H1 data."""
         try:
             w_levels = self.identify_sr_weekly(
-                df_h1,
-                symbol=symbol,
-                weeks=weeks,
-                weekly_buffer=weekly_buffer
+                df_h1, symbol=symbol, weeks=weeks, weekly_buffer=weekly_buffer
             )
             if not w_levels:
                 self.logger.warning(f"No weekly levels found for {symbol}")
                 return
 
-            # Ensure all levels are float values
             w_levels = [float(level) for level in w_levels]
-
-            # Update the symbol-specific levels
             self.symbol_levels[symbol] = w_levels
             self.logger.info(f"Updated valid levels for {symbol}. Total: {len(w_levels)}")
 
-            # Update signal generator's levels for current symbol
+            # Attach or update a signal generator for this symbol
             if symbol == self.default_symbol:
                 self.signal_generator.valid_levels = w_levels
             else:
-                signal_gen_attr = f'signal_generator_{symbol}'
+                signal_gen_attr = f"signal_generator_{symbol}"
                 if not hasattr(self, signal_gen_attr):
-                    setattr(self, signal_gen_attr, self.SignalGenerator(
-                        valid_levels=w_levels,
-                        logger=self.logger,
-                        debug=False,
-                        parent_strategy=self
-                    ))
+                    setattr(
+                        self,
+                        signal_gen_attr,
+                        self.SignalGenerator(
+                            valid_levels=w_levels,
+                            logger=self.logger,
+                            debug=False,
+                            parent_strategy=self,
+                        ),
+                    )
                 else:
                     getattr(self, signal_gen_attr).valid_levels = w_levels
 
         except Exception as e:
             self.logger.error(f"Error updating weekly levels for {symbol}: {str(e)}")
 
-
-    def generate_signals(self, df_segment, symbol="EURUSD"):
-        """
-        Modified to use symbol-specific signal generators.
-        """
+    # -------------------------------------------------------------------------
+    # Signal and Trade Management
+    # -------------------------------------------------------------------------
+    def generate_signals(self, df_segment: pd.DataFrame, symbol="EURUSD"):
+        """Generate signals by delegating to the correct SignalGenerator for the symbol."""
         if symbol == self.default_symbol:
             return self.signal_generator.generate_signal(df_segment, symbol)
-
-        signal_gen = getattr(self, f'signal_generator_{symbol}', None)
+        signal_gen = getattr(self, f"signal_generator_{symbol}", None)
         if signal_gen is None:
-            self.logger.warning(f"No signal generator for {symbol}, creating one")
+            self.logger.warning(f"No signal generator for {symbol}, creating one.")
             signal_gen = self.SignalGenerator(
                 valid_levels=self.symbol_levels.get(symbol, []),
                 logger=self.logger,
                 debug=False,
-                parent_strategy=self
+                parent_strategy=self,
             )
-            setattr(self, f'signal_generator_{symbol}', signal_gen)
-
+            setattr(self, f"signal_generator_{symbol}", signal_gen)
         return signal_gen.generate_signal(df_segment, symbol)
 
-
     def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
-        """Calculate stop loss based on signal type and recent price action."""
+        """
+        Modified pip_buffer from 0.0008 to 0.0012 to widen the SL,
+        reducing the chance of quick wicks hitting SL prematurely.
+        """
         if df_segment.empty:
             return 0.0
-
         last_bar = df_segment.iloc[-1]
-        close_price = float(last_bar['close'])
-        low = float(last_bar['low'])
-        high = float(last_bar['high'])
+        low = float(last_bar["low"])
+        high = float(last_bar["high"])
 
-        pip_buffer = 0.0008
+        # Increased buffer from 0.0008 -> 0.0012
+        pip_buffer = 0.0012
 
         if signal["type"] == "BUY":
-            stop_loss = low - pip_buffer
-            self.logger.debug(f"Buy signal => SL set below last low: {stop_loss:.5f}")
-        else:  # SELL
-            stop_loss = high + pip_buffer
-            self.logger.debug(f"Sell signal => SL set above last high: {stop_loss:.5f}")
+            return low - pip_buffer
+        else:
+            return high + pip_buffer
 
-        return stop_loss
 
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
         """
-        Risk-based position sizing targeting 1% risk per trade.
-
-        Args:
-            account_balance: Current account balance
-            stop_distance: Distance to stop loss in price terms
-        Returns:
-            float: Position size in lots
+        1% risk model with a fallback to min/max lots.
+        E.g., if risk is 1% of balance and stop distance is X pips, we size accordingly.
         """
         try:
-            # Target 1% risk of account
             risk_amount = account_balance * 0.01
-
-            # Convert stop distance to pips
             stop_pips = stop_distance * 10000
-
             if stop_pips == 0:
                 return 0.0
-
-            # Calculate position size
-            # $10 per pip per lot, so:
-            # risk_amount = stop_pips * $10 * lots
-            # Therefore: lots = risk_amount / (stop_pips * 10)
             position_size = risk_amount / (stop_pips * 10)
-
-            # Safety limits for FTMO
-            max_position = 5.0  # Maximum 5 lots
-            position_size = min(position_size, max_position)
-            position_size = max(position_size, 0.01)  # Minimum 0.01 lots
-
-            # Round to 2 decimal places
+            position_size = min(position_size, 5.0)
+            position_size = max(position_size, 0.01)
             return round(position_size, 2)
-
         except Exception as e:
             self.logger.error(f"Position sizing error: {str(e)}")
-            return 0.01  # Safe fallback
-    def calculate_take_profit(self, entry_price: float, sl: float, symbol: str) -> float:
+            return 0.01
 
-        """
-        If risk_reward=2.0, the distance from entry to SL is multiplied by 2
-        for the TP distance.
-        """
+    def calculate_take_profit(self, entry_price: float, sl: float, symbol: str) -> float:
+        """Simple R:R based TP using pair_settings' risk_reward."""
         dist = abs(entry_price - sl)
-        rr = self.pair_settings[symbol]["risk_reward"]  # new approach
+        rr = self.pair_settings[symbol]["risk_reward"]
         if entry_price > sl:
             return entry_price + (dist * rr)
         else:
             return entry_price - (dist * rr)
 
-    def check_exit_conditions(self, df_segment: pd.DataFrame, position: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Check if SL or TP is touched by the last bar's close.
-        Return (should_close, reason).
-        """
+    def check_exit_conditions(
+        self, df_segment: pd.DataFrame, position: Dict[str, Any]
+    ) -> Tuple[bool, str]:
+        """Check if the position hits SL or TP on the last bar of df_segment."""
         if df_segment.empty:
             return False, "No data"
-
         last_bar = df_segment.iloc[-1]
         current_price = float(last_bar["close"])
         pos_type = position.get("type", "BUY")
-
         if pos_type == "BUY":
             if current_price <= position["stop_loss"]:
                 return True, "Stop loss hit"
             if current_price >= position["take_profit"]:
                 return True, "Take profit hit"
-        else:  # SELL
+        else:
             if current_price >= position["stop_loss"]:
                 return True, "Stop loss hit"
             if current_price <= position["take_profit"]:
                 return True, "Take profit hit"
-
         return False, "No exit condition met"
 
-
-    def open_trade(self, current_segment: pd.DataFrame, balance: float, i: int, symbol: str = "EURUSD") -> Optional["SR_Bounce_Strategy.Trade"]:
-        """
-        Enhanced trade opening that respects FTMO checks and applies correlation-based
-        exposure tiers (block/partial/normal) before finalizing the trade.
-        Also includes entry_reason, level_source, etc.
-        """
+    def open_trade(
+        self, current_segment: pd.DataFrame, balance: float, i: int, symbol: str = "EURUSD"
+    ) -> Optional["SR_Bounce_Strategy.Trade"]:
+        """Open trade if all FTMO checks pass, volume is sufficient, and a valid signal is generated."""
         if current_segment.empty:
             return None
-
         last_bar = current_segment.iloc[-1]
-        current_time = pd.to_datetime(last_bar['time'])
-        bar_range = float(last_bar['high']) - float(last_bar['low'])
-        # Approximate spread for demonstration
+        current_time = pd.to_datetime(last_bar["time"])
+        bar_range = float(last_bar["high"]) - float(last_bar["low"])
         current_spread = bar_range * 0.1
 
-        # 1) Check basic FTMO rules (daily limits, spread, etc.)
-        can_trade, reason = self._validate_ftmo_rules(
-            current_time=current_time,
-            spread=current_spread,
-            symbol=symbol
-        )
+        # Validate FTMO rules
+        can_trade, reason = self._validate_ftmo_rules(current_time, current_spread, symbol)
         if not can_trade:
             self.logger.debug(f"[{symbol}] FTMO check failed: {reason}")
             return None
 
-        # 2) Generate signal from strategy logic
         signal = self.generate_signals(current_segment, symbol=symbol)
         if signal["type"] == "NONE":
             return None
 
-        # 3) Volume threshold check
         if float(last_bar["tick_volume"]) < self.pair_settings[symbol]["min_volume_threshold"]:
             return None
 
-        # 4) Basic open price & stop distance
         entry_price = float(last_bar["close"])
         stop_loss = self.calculate_stop_loss(signal, current_segment)
         stop_distance = abs(entry_price - stop_loss)
         if stop_distance < 0.00001:
             return None
 
-        # 5) Initial position sizing (before correlation adjustments)
         base_size = self.calculate_position_size(balance, stop_distance)
-
-        # 6) Calculate take-profit
         take_profit = self.calculate_take_profit(entry_price, stop_loss, symbol)
 
-        # 7) Create a provisional new Trade object
+        # Create trade object
         new_trade = SR_Bounce_Strategy.Trade(
             open_i=i,
             open_time=str(last_bar["time"]),
@@ -456,147 +466,171 @@ class SR_Bounce_Strategy:
             entry_price=entry_price,
             sl=stop_loss,
             tp=take_profit,
-            size=base_size
+            size=base_size,
         )
-
-        # Existing fields:
-        new_trade.level = signal.get('level', 0.0)
+        new_trade.level = signal.get("level", 0.0)
         new_trade.level_type = "Support" if signal["type"] == "BUY" else "Resistance"
-        new_trade.distance_to_level = abs(entry_price - signal.get('level', entry_price))
-        new_trade.entry_volume = float(last_bar['tick_volume'])
-        new_trade.prev_3_avg_volume = float(current_segment['tick_volume'].tail(3).mean())
-        new_trade.hour_avg_volume = float(current_segment['tick_volume'].tail(4).mean())
+        new_trade.distance_to_level = abs(entry_price - signal.get("level", entry_price))
+        new_trade.entry_volume = float(last_bar["tick_volume"])
+        new_trade.prev_3_avg_volume = float(current_segment["tick_volume"].tail(3).mean())
+        new_trade.hour_avg_volume = float(current_segment["tick_volume"].tail(4).mean())
 
-        # NEW: set entry_reason, combining all signal reasons
         if "reasons" in signal:
             new_trade.entry_reason = " + ".join(signal["reasons"])
         else:
             new_trade.entry_reason = "No specific reason"
 
-        # NEW: set indicator_snapshot if you want to store some data
-        new_trade.indicator_snapshot = {
-            "3_bar_avg": new_trade.prev_3_avg_volume,
-            "hour_avg": new_trade.hour_avg_volume
-            # Add more if you have RSI, etc.
-        }
-
-        # NEW: example level_source & level_touches (placeholders):
-        # If your logic tracks monthly vs. weekly, store actual info. Otherwise set "Unknown".
-        new_trade.level_source = "Unknown"     # or "Monthly" / "Weekly" / "Intraday"
-        new_trade.level_touches = 0           # or any real calculation of how many times this level was touched
-
-        # 8) We'll record this provisional trade into the daily_trades dict, but final approval
-        #    depends on cross-pair correlation checks:
+        # Log trade to daily trades
         if symbol not in self.daily_trades:
             self.daily_trades[symbol] = []
-        self.daily_trades[symbol].append({
-            'time': new_trade.open_time,
-            'type': new_trade.type,
-            'size': new_trade.size,
-            'exposure': new_trade.size * 10000.0  # naive exposure estimate
-        })
-
+        self.daily_trades[symbol].append(
+            {
+                "time": new_trade.open_time,
+                "type": new_trade.type,
+                "size": new_trade.size,
+                "exposure": new_trade.size * 10000.0,
+            }
+        )
         return new_trade
 
-
-    def exit_trade(self, df_segment: pd.DataFrame, trade: "SR_Bounce_Strategy.Trade", symbol: str = "EURUSD") -> Tuple[bool, float, float]:
+    def exit_trade(
+        self, df_segment: pd.DataFrame, trade: "SR_Bounce_Strategy.Trade", symbol: str = "EURUSD"
+    ) -> Tuple[bool, float, float]:
         """
-        Enhanced exit with multi-symbol awareness.
-        Returns (should_close, fill_price, pnl).
-        Sets trade.exit_reason if we do close.
+        Checks if the trade hits SL or TP intrabar (based on the bar's high & low).
+        If intrabar hit occurs, calculates fill_price accordingly. Otherwise, returns no exit.
+
+        Returns:
+          - (True, fill_price, pnl) if exit triggered
+          - (False, 0.0, 0.0) if not
         """
-        position_dict = {
-            "type": trade.type,
-            "stop_loss": trade.sl,
-            "take_profit": trade.tp
-        }
-        should_close, reason = self.check_exit_conditions(df_segment, position_dict)
-        if should_close:
-            last_bar = df_segment.iloc[-1]
-            # Distinguish final fill_price:
-            if reason == "Stop loss hit":
-                fill_price = trade.sl
-            elif reason == "Take profit hit":
-                fill_price = trade.tp
-            else:
-                fill_price = float(last_bar["close"])
 
-            # Calculate PnL
-            if trade.type == "BUY":
-                pnl = (fill_price - trade.entry_price) * 10000.0 * trade.size
-            else:
-                pnl = (trade.entry_price - fill_price) * 10000.0 * trade.size
+        if df_segment.empty:
+            return False, 0.0, 0.0
 
-            # NEW: store exit_reason in the Trade object
+        last_bar = df_segment.iloc[-1]
+        bar_open = float(last_bar["open"])
+        bar_high = float(last_bar["high"])
+        bar_low = float(last_bar["low"])
+        bar_close = float(last_bar["close"])
+
+        stop_loss = trade.sl
+        take_profit = trade.tp
+
+        # We assume the bar moves from OPEN -> HIGH/LOW -> CLOSE or OPEN -> LOW/HIGH -> CLOSE.
+        # We'll do a simplified check of which level was hit first for a BUY vs. SELL trade.
+
+        # For a BUY trade:
+        if trade.type == "BUY":
+            # Check if the bar's low touches or breaks stop_loss
+            # Check if the bar's high touches or breaks take_profit
+            # We attempt a rudimentary "order of hits" approach:
+            # 1) If bar_low <= SL and bar_high >= TP, see which is closer to the open price => that is hit first
+            # 2) Else if bar_low <= SL only => SL hit
+            # 3) Else if bar_high >= TP only => TP hit
+            # 4) Else => no exit
+            if bar_low <= stop_loss and bar_high >= take_profit:
+                dist_to_sl = abs(bar_open - stop_loss)
+                dist_to_tp = abs(bar_open - take_profit)
+                if dist_to_sl < dist_to_tp:
+                    fill_price = stop_loss
+                    reason = "Stop loss hit intrabar"
+                else:
+                    fill_price = take_profit
+                    reason = "Take profit hit intrabar"
+            elif bar_low <= stop_loss:
+                fill_price = stop_loss
+                reason = "Stop loss hit intrabar"
+            elif bar_high >= take_profit:
+                fill_price = take_profit
+                reason = "Take profit hit intrabar"
+            else:
+                # No exit
+                return False, 0.0, 0.0
+
+            # Compute PnL
+            pnl = (fill_price - trade.entry_price) * 10000.0 * trade.size
             trade.exit_reason = reason
 
-            # Update daily PnL
-            self.daily_pnl += pnl
-            return True, fill_price, pnl
+        # For a SELL trade:
+        else:
+            # Check if bar_high >= stop_loss
+            # Check if bar_low <= take_profit
+            if bar_high >= stop_loss and bar_low <= take_profit:
+                dist_to_sl = abs(bar_open - stop_loss)
+                dist_to_tp = abs(bar_open - take_profit)
+                if dist_to_sl < dist_to_tp:
+                    fill_price = stop_loss
+                    reason = "Stop loss hit intrabar"
+                else:
+                    fill_price = take_profit
+                    reason = "Take profit hit intrabar"
+            elif bar_high >= stop_loss:
+                fill_price = stop_loss
+                reason = "Stop loss hit intrabar"
+            elif bar_low <= take_profit:
+                fill_price = take_profit
+                reason = "Take profit hit intrabar"
+            else:
+                return False, 0.0, 0.0
 
-        return False, 0.0, 0.0
+            pnl = (trade.entry_price - fill_price) * 10000.0 * trade.size
+            trade.exit_reason = reason
+
+        # If we got here, the trade is considered closed
+        return True, fill_price, pnl
 
     def validate_cross_pair_exposure(
         self,
         new_trade: "SR_Bounce_Strategy.Trade",
         active_trades: Dict[str, Optional["SR_Bounce_Strategy.Trade"]],
-        current_balance: float
+        current_balance: float,
     ) -> Tuple[bool, str]:
         """
-        Enhanced correlation-based cross-pair exposure management.
-        - correlation > 0.95: Block new trades on the second pair
-        - correlation 0.70 - 0.95: Partial exposure; the new trade's size is reduced
-        - correlation < 0.70: Normal rules apply
+        Validate that adding new_trade won't exceed correlation or total lot constraints
+        across all active trades in the account.
         """
-        # Primary (HIGH) and secondary (MEDIUM) thresholds
         HIGH_CORR_THRESHOLD = 0.95
         MEDIUM_CORR_THRESHOLD = 0.70
+        self.logger.info(f"[{new_trade.symbol}] Starting cross-pair validation. Size: {new_trade.size}")
 
-        self.logger.info(f"[{new_trade.symbol}] Starting cross-pair validation. Initial size: {new_trade.size}")
-
-        # 1) Calculate total open lots across all symbols
-        total_open_lots = 0.0
-        for sym, trade in active_trades.items():
-            if trade is not None:
-                total_open_lots += trade.size
-                self.logger.info(f"Active trade found: {sym} size: {trade.size}")
-
-        # 2) Check if adding new_trade would exceed our total lot cap
+        # Check total open lots
+        total_open_lots = sum(t.size for t in active_trades.values() if t is not None)
         if total_open_lots + new_trade.size > 10.0:
-            self.logger.warning(f"[{new_trade.symbol}] Total lots would exceed limit: {total_open_lots + new_trade.size:.2f}")
-            return (False, f"Total open lots would exceed limit: {total_open_lots + new_trade.size:.2f}")
+            return (
+                False,
+                f"Total open lots would exceed limit: {total_open_lots + new_trade.size:.2f}",
+            )
 
-        # 3) Correlation-based logic
+        # Check correlation adjustments
         new_sym = new_trade.symbol
-
         for sym, open_trade in active_trades.items():
-            if open_trade is None:
-                continue
-            if sym == new_sym:
+            if open_trade is None or sym == new_sym:
                 continue
 
             corr = abs(self.symbol_correlations.get(new_sym, {}).get(sym, 0.0))
-            self.logger.info(f"Correlation between {new_sym} and {sym}: {corr:.4f}")
-
             if corr > HIGH_CORR_THRESHOLD:
-                self.logger.warning(f"[{new_sym}] High correlation block: {corr:.4f} > {HIGH_CORR_THRESHOLD}")
-                return (False, f"Correlation {corr:.2f} with {sym} > {HIGH_CORR_THRESHOLD} => blocking new trade.")
+                return (
+                    False,
+                    f"Correlation {corr:.2f} with {sym} > {HIGH_CORR_THRESHOLD} => blocking trade.",
+                )
             elif corr >= MEDIUM_CORR_THRESHOLD:
                 old_size = new_trade.size
                 new_trade.size = round(new_trade.size * 0.20, 2)
-                self.logger.info(f"[{new_sym}] Reducing size from {old_size} to {new_trade.size} due to correlation {corr:.4f}")
                 if new_trade.size < 0.01:
-                    return (False, f"Partial correlation reduction made size < 0.01 lots => skip trade.")
+                    return False, "Partial correlation reduction made size < 0.01 => skip trade."
+                self.logger.info(
+                    f"Reducing trade size from {old_size:.2f} to {new_trade.size:.2f}"
+                    f" due to correlation {corr:.2f} with {sym}."
+                )
+        return True, "OK"
 
-        self.logger.info(f"[{new_trade.symbol}] Cross-pair validation passed. Final size: {new_trade.size}")
-        return (True, "OK")
-
-
-
-
-
-
+    # -------------------------------------------------------------------------
+    # Inner Classes
+    # -------------------------------------------------------------------------
     class Trade:
+        """Tracks relevant data for a single trade lifecycle."""
+
         def __init__(
             self,
             open_i: int,
@@ -606,7 +640,7 @@ class SR_Bounce_Strategy:
             entry_price: float,
             sl: float,
             tp: float,
-            size: float
+            size: float,
         ):
             self.open_i = open_i
             self.open_time = open_time
@@ -617,65 +651,49 @@ class SR_Bounce_Strategy:
             self.tp = tp
             self.size = size
 
-            # When the trade is closed:
-            self.close_i = None
-            self.close_time = None
-            self.close_price = None
-            self.pnl = 0.0
+            self.close_i: Optional[int] = None
+            self.close_time: Optional[str] = None
+            self.close_price: Optional[float] = None
+            self.pnl: float = 0.0
 
-            # Existing volume fields
-            self.entry_volume = 0.0
-            self.prev_3_avg_volume = 0.0
-            self.hour_avg_volume = 0.0
+            self.entry_volume: float = 0.0
+            self.prev_3_avg_volume: float = 0.0
+            self.hour_avg_volume: float = 0.0
 
-            # Existing S/R data
-            self.level = 0.0
-            self.distance_to_level = 0.0
-            self.level_type = ""
-
-            # NEW FIELDS (expanded for clarity):
-            self.entry_reason = ""       # e.g. "Bounced off support + momentum filter"
-            self.exit_reason = ""        # e.g. "Hit trailing stop at 1.2580"
-            self.level_source = ""       # e.g. "Monthly", "Weekly", or "Intraday"
-            self.level_touches = 0       # how many times this level was touched historically
-            self.indicator_snapshot = {} # e.g. {"3_bar_avg": 2000, "hour_avg": 1800}
+            self.level: float = 0.0
+            self.distance_to_level: float = 0.0
+            self.level_type: str = ""
+            self.entry_reason: str = ""
+            self.exit_reason: str = ""
+            self.level_source: str = ""
+            self.level_touches: int = 0
+            self.indicator_snapshot: dict = {}
 
         def pips(self) -> float:
-            """
-            Returns the difference (in pips) between entry and close prices.
-            A BUY trade has positive pips if close_price > entry_price.
-            A SELL trade has positive pips if close_price < entry_price.
-            """
+            """Number of pips gained/lost so far."""
             if self.close_price is None:
                 return 0.0
-
             raw_diff = (
-                (self.close_price - self.entry_price)
-                if self.type == "BUY" else
-                (self.entry_price - self.close_price)
+                self.close_price - self.entry_price
+                if self.type == "BUY"
+                else self.entry_price - self.close_price
             )
             return raw_diff * 10000.0
 
         def profit(self) -> float:
-            """
-            Recomputes profit in dollars (even if self.pnl is already set).
-            1 pip = $1 per 1.0 lot in this example. Adjust if needed.
-            """
-            return self.pips() * self.size * 1.0
+            """Monetary profit of the trade."""
+            return self.pips() * self.size
 
         def holding_time(self) -> pd.Timedelta:
-            """
-            Returns the time difference between open_time and close_time.
-            If trade not closed, returns zero duration.
-            """
+            """Time in the trade."""
             if not self.close_time:
                 return pd.Timedelta(0, unit="seconds")
-
             open_t = pd.to_datetime(self.open_time)
             close_t = pd.to_datetime(self.close_time)
             return close_t - open_t
 
         def to_dict(self) -> dict:
+            """Return dictionary representation for reporting/logging."""
             return {
                 "open_i": self.open_i,
                 "open_time": self.open_time,
@@ -699,192 +717,156 @@ class SR_Bounce_Strategy:
                 "exit_reason": self.exit_reason,
                 "level_source": self.level_source,
                 "level_touches": self.level_touches,
-                "indicator_snapshot": self.indicator_snapshot
+                "indicator_snapshot": self.indicator_snapshot,
             }
-
-
 
     class SignalGenerator:
         """
-        Inner class for signal generation and bounce detection, now with:
-         - Symbol-aware bounce_registry
-         - Correlation-based signal filtering
-         - Simple conflict check
-         - Minimal volume comparison across pairs
+        Simple bounce-based signal generator. Checks volume thresholds, correlation,
+        and adjacency to known S/R levels.
         """
 
-        def __init__(self, valid_levels, logger, debug=False, parent_strategy=None):
+        def __init__(
+            self,
+            valid_levels: List[float],
+            logger: logging.Logger,
+            debug: bool = False,
+            parent_strategy: Optional["SR_Bounce_Strategy"] = None,
+        ):
             self.valid_levels = valid_levels
             self.logger = logger
             self.debug = debug
-
-            # Link back to the parent strategy for correlation data
             self.parent_strategy = parent_strategy
-
-            # Make the bounce registry symbol-aware:
-            self.bounce_registry = {}
-
-            # Moved signal_stats here for clarity
+            self.bounce_registry: Dict[str, Dict] = {}
             self.signal_stats = {
                 "volume_filtered": 0,
                 "first_bounce_recorded": 0,
                 "second_bounce_low_volume": 0,
                 "signals_generated": 0,
-                "tolerance_misses": 0
+                "tolerance_misses": 0,
             }
+            # Symbol-specific config
             self.pair_settings = {
                 "EURUSD": {
                     "min_touches": 8,
                     "min_volume_threshold": 1200,
                     "margin_pips": 0.0030,
                     "tolerance": 0.0005,
-                    "min_bounce_volume": 1000
+                    "min_bounce_volume": 1000,
                 },
                 "GBPUSD": {
                     "min_touches": 7,
                     "min_volume_threshold": 1500,
                     "margin_pips": 0.0035,
                     "tolerance": 0.0007,
-                    "min_bounce_volume": 1200
-                }
+                    "min_bounce_volume": 1200,
+                },
             }
 
         def generate_signal(self, df_segment: pd.DataFrame, symbol: str) -> Dict[str, Any]:
-            """
-            Main signal generation routine with correlation-based filtering and
-            volume comparison across pairs.
-            """
+            """Generate a simple BUY/SELL signal if last bar is near an S/R level with enough volume."""
             last_idx = len(df_segment) - 1
             if last_idx < 0:
                 return self._create_no_signal("Segment has no rows")
 
-            # Get pair-specific settings
-            settings = self.pair_settings.get(symbol, self.pair_settings["EURUSD"])  # Default to EURUSD if pair not found
-
-            # 1) Check correlation filter
+            settings = self.pair_settings.get(symbol, self.pair_settings["EURUSD"])
             correlation_threshold = 0.95
             correlations = self.parent_strategy.symbol_correlations.get(symbol, {})
+
+            # Quick correlation block, just as an example check
             for other_symbol, corr_val in correlations.items():
                 if abs(corr_val) > correlation_threshold:
                     reason = f"Correlation {corr_val:.2f} with {other_symbol} exceeds {correlation_threshold}"
                     return self._create_no_signal(reason)
 
-            # 2) Basic volume comparison across pairs
-            last_bar_volume = float(df_segment.iloc[last_idx]['tick_volume'])
-            for other_symbol, corr_val in correlations.items():
-                if abs(corr_val) > correlation_threshold:
-                    continue
-                if other_symbol in self.parent_strategy.symbol_data:
-                    other_df = self.parent_strategy.symbol_data[other_symbol]
-                    if len(other_df) > 0:
-                        other_avg_vol = other_df['tick_volume'].tail(5).mean()
-                        current_avg_vol = df_segment['tick_volume'].tail(5).mean()
-                        if other_avg_vol > (2 * current_avg_vol):
-                            reason = f"Volume on {other_symbol} significantly higher than {symbol}"
-                            return self._create_no_signal(reason)
-
-            # 3) Normal signal logic
             last_bar = df_segment.iloc[last_idx]
+            last_bar_volume = float(last_bar["tick_volume"])
 
-            # Check if volume is sufficient using pair-specific threshold
-            if float(last_bar["tick_volume"]) < self.pair_settings[symbol]["min_volume_threshold"]:
+            # Volume check vs. threshold
+            if last_bar_volume < settings["min_volume_threshold"]:
                 self.signal_stats["volume_filtered"] += 1
                 return self._create_no_signal("Volume too low vs. threshold")
 
-            # Evaluate bullish or bearish bar
-            close_ = float(last_bar['close'])
-            open_ = float(last_bar['open'])
-            high_ = float(last_bar['high'])
-            low_ = float(last_bar['low'])
+            close_ = float(last_bar["close"])
+            open_ = float(last_bar["open"])
+            high_ = float(last_bar["high"])
+            low_ = float(last_bar["low"])
+
             bullish = close_ > open_
             bearish = close_ < open_
-
-            # Use pair-specific tolerance
             tol = settings["tolerance"]
 
+            # Look for near support/resistance
             for lvl in self.valid_levels:
                 near_support = bullish and (abs(low_ - lvl) <= tol)
                 near_resistance = bearish and (abs(high_ - lvl) <= tol)
-
                 distance_pips = abs(close_ - lvl) * 10000
+
                 if distance_pips > 15:
                     continue
 
-                # Track near misses
-                if bullish and not near_support and abs(low_ - lvl) <= tol * 2:
-                    self.signal_stats["tolerance_misses"] += 1
-                if bearish and not near_resistance and abs(high_ - lvl) <= tol * 2:
-                    self.signal_stats["tolerance_misses"] += 1
-
                 if near_support or near_resistance:
                     self.logger.debug(
-                        f"{symbol} potential bounce at level={lvl}, "
-                        f"time={last_bar['time']}, volume={last_bar['tick_volume']}"
+                        f"{symbol} potential bounce at level={lvl}, time={last_bar['time']}, volume={last_bar_volume}"
                     )
                     signal = self._process_bounce(
-                        lvl, float(last_bar['tick_volume']), last_bar['time'],
-                        is_support=near_support, symbol=symbol
+                        lvl, last_bar_volume, last_bar["time"], is_support=near_support, symbol=symbol
                     )
                     if signal and signal["type"] != "NONE":
                         self.signal_stats["signals_generated"] += 1
                         return signal
 
+            # No near bounce identified
             return self._create_no_signal("No bounce off valid levels")
 
-
-        def _process_bounce(self, level, volume, time, is_support, symbol) -> Optional[Dict[str, Any]]:
+        def _process_bounce(
+            self, level: float, volume: float, time_val: Any, is_support: bool, symbol: str
+        ) -> Optional[Dict[str, Any]]:
             """
-            Make bounce registry symbol-aware with improved volume validation
+            Handle the first bounce registration and second bounce signal creation.
             """
             settings = self.pair_settings.get(symbol, self.pair_settings["EURUSD"])
-
             if symbol not in self.bounce_registry:
                 self.bounce_registry[symbol] = {}
-
             level_key = str(level)
 
+            # If no bounce record, record the first bounce
             if level_key not in self.bounce_registry[symbol]:
                 self.bounce_registry[symbol][level_key] = {
                     "first_bounce_volume": volume,
-                    "timestamp": time,
-                    "last_trade_time": None
+                    "timestamp": time_val,
+                    "last_trade_time": None,
                 }
                 self.signal_stats["first_bounce_recorded"] += 1
-                self.logger.debug(f"[1st bounce] {symbol} volume={volume} at lvl={level}")
                 return self._create_no_signal(f"First bounce recorded for {symbol} at {level}")
 
+            # If there's a recent bounce, ensure we don't over-trade
             if self.bounce_registry[symbol][level_key].get("last_trade_time"):
                 last_trade = pd.to_datetime(self.bounce_registry[symbol][level_key]["last_trade_time"])
-                current_time = pd.to_datetime(time)
-                cooldown_period = pd.Timedelta(hours=2)
-                if current_time - last_trade < cooldown_period:
+                current_time = pd.to_datetime(time_val)
+                if current_time - last_trade < pd.Timedelta(hours=2):
                     return self._create_no_signal(f"Level {level} in cooldown for {symbol}")
 
             first_vol = self.bounce_registry[symbol][level_key]["first_bounce_volume"]
             min_vol_threshold = settings["min_bounce_volume"]
 
-            if volume < min_vol_threshold or volume < first_vol * 0.8:  # Increased from 0.6 to 0.8
+            # If second bounce has insufficient volume
+            if volume < min_vol_threshold or volume < first_vol * 0.8:
                 self.signal_stats["second_bounce_low_volume"] += 1
                 return self._create_no_signal("Second bounce volume insufficient")
 
             bounce_type = "BUY" if is_support else "SELL"
             reason = f"Valid bounce at {'support' if is_support else 'resistance'} {level} for {symbol}"
-
-            self.bounce_registry[symbol][level_key]["last_trade_time"] = time
+            self.bounce_registry[symbol][level_key]["last_trade_time"] = time_val
             self.signal_stats["signals_generated"] += 1
-
             return {
                 "type": bounce_type,
                 "strength": 0.8,
                 "reasons": [reason],
-                "level": level
+                "level": level,
             }
 
         def _create_no_signal(self, reason: str) -> Dict[str, Any]:
+            """Return a dict representing no-signal."""
             self.logger.debug(f"No signal: {reason}")
-            return {
-                "type": "NONE",
-                "strength": 0.0,
-                "reasons": [reason],
-                "level": None
-            }
+            return {"type": "NONE", "strength": 0.0, "reasons": [reason], "level": None}
