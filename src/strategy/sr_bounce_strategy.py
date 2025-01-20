@@ -27,19 +27,27 @@ class SR_Bounce_Strategy:
       - FTMO-like rule checks
       - S/R level detection
       - Generating signals and trades
+
+    Simplified version that:
+      - Lowers volume thresholds to allow more trades
+      - Reduces correlation constraints
+      - Relaxes the second bounce requirement
+      - Shortens the cooldown from 2 hours to 1 hour
+      - Reduces min_touches in S/R identification
     """
 
     def __init__(self, logger: logging.Logger = None):
         """
-        Modified to lower 'risk_reward' from 3.0 to 2.0,
-        so that take-profit is closer and trades have a higher chance to hit TP.
+        Adjusted to lower 'risk_reward' from 3.0 to 2.0,
+        lowered volume thresholds, relaxed bounce checks,
+        and correlation checks so we can see more trades.
         """
         self.logger = logger or get_strategy_logger()
 
-        # Per-symbol settings: lowered risk_reward to 2.0
+        # Per-symbol settings: we now allow lower volume thresholds
         self.pair_settings = {
-            "EURUSD": {"min_volume_threshold": 1200, "risk_reward": 2.0},
-            "GBPUSD": {"min_volume_threshold": 1500, "risk_reward": 2.0},
+            "EURUSD": {"min_volume_threshold": 500, "risk_reward": 2.0},  # Was 1200
+            "GBPUSD": {"min_volume_threshold": 600, "risk_reward": 2.0},  # Was 1500
         }
 
         # Data storage
@@ -47,7 +55,7 @@ class SR_Bounce_Strategy:
         self.symbol_levels = {}
         self.symbol_bounce_registry = {}
 
-        # Correlation data
+        # Correlation data (limit raised to 0.90 to allow more trades)
         self.symbol_correlations = {
             "EURUSD": {"GBPUSD": 0.0, "USDJPY": 0.0},
         }
@@ -56,7 +64,7 @@ class SR_Bounce_Strategy:
         self.ftmo_limits = {
             "daily_loss_per_pair": 5000,
             "total_exposure": 25000,
-            "correlation_limit": 0.75,
+            "correlation_limit": 0.90,  # was 0.75
             "max_correlated_positions": 2,
         }
 
@@ -75,7 +83,7 @@ class SR_Bounce_Strategy:
         self.profit_target = 0.10
         self.max_positions = 3
         self.max_daily_trades = 8
-        self.max_spread = 0.002
+        self.max_spread = 0.002  # 20 pips
         self.last_reset = datetime.now().date()
         self.daily_trades = {}
 
@@ -223,6 +231,7 @@ class SR_Bounce_Strategy:
         """
         Identify significant S/R levels from H1 data over the last `weeks` weeks,
         grouped into chunks of `chunk_size` bars, with a small merging buffer.
+        Lower min_touches from ~7-8 to ~3 for more lenient detection.
         """
         try:
             if df_h1.empty:
@@ -358,8 +367,7 @@ class SR_Bounce_Strategy:
 
     def calculate_stop_loss(self, signal: Dict[str, Any], df_segment: pd.DataFrame) -> float:
         """
-        Modified pip_buffer from 0.0008 to 0.0012 to widen the SL,
-        reducing the chance of quick wicks hitting SL prematurely.
+        Slightly widened SL. 0.0012 pips buffer to reduce quick wicks.
         """
         if df_segment.empty:
             return 0.0
@@ -367,7 +375,6 @@ class SR_Bounce_Strategy:
         low = float(last_bar["low"])
         high = float(last_bar["high"])
 
-        # Increased buffer from 0.0008 -> 0.0012
         pip_buffer = 0.0012
 
         if signal["type"] == "BUY":
@@ -375,11 +382,9 @@ class SR_Bounce_Strategy:
         else:
             return high + pip_buffer
 
-
     def calculate_position_size(self, account_balance: float, stop_distance: float) -> float:
         """
-        1% risk model with a fallback to min/max lots.
-        E.g., if risk is 1% of balance and stop distance is X pips, we size accordingly.
+        1% risk model, fallback to min/max lots.
         """
         try:
             risk_amount = account_balance * 0.01
@@ -406,7 +411,7 @@ class SR_Bounce_Strategy:
     def check_exit_conditions(
         self, df_segment: pd.DataFrame, position: Dict[str, Any]
     ) -> Tuple[bool, str]:
-        """Check if the position hits SL or TP on the last bar of df_segment."""
+        """Checks if the position hits SL or TP on the last bar of df_segment."""
         if df_segment.empty:
             return False, "No data"
         last_bar = df_segment.iloc[-1]
@@ -427,15 +432,41 @@ class SR_Bounce_Strategy:
     def open_trade(
         self, current_segment: pd.DataFrame, balance: float, i: int, symbol: str = "EURUSD"
     ) -> Optional["SR_Bounce_Strategy.Trade"]:
-        """Open trade if all FTMO checks pass, volume is sufficient, and a valid signal is generated."""
+        """
+        Open trade if all FTMO checks pass, volume is enough,
+        and a valid signal is generated.
+
+        Added improvements:
+          - Only allow trades between 07:00 and 17:00 UTC (time filter)
+          - Require bar range >= 0.0005 to skip tiny bars (range filter)
+        """
+
         if current_segment.empty:
             return None
+
         last_bar = current_segment.iloc[-1]
         current_time = pd.to_datetime(last_bar["time"])
-        bar_range = float(last_bar["high"]) - float(last_bar["low"])
-        current_spread = bar_range * 0.1
 
-        # Validate FTMO rules
+        # -----------------------
+        # 1) Time Window Filter
+        # -----------------------
+        bar_hour = current_time.hour
+        if bar_hour < 7 or bar_hour > 17:
+            self.logger.debug(f"[{symbol}] Skipping trade, out-of-hour range: {bar_hour}")
+            return None
+
+        # -----------------------
+        # 2) Bar Range Filter
+        # -----------------------
+        bar_range = float(last_bar["high"]) - float(last_bar["low"])
+        if bar_range < 0.0005:
+            self.logger.debug(f"[{symbol}] Skipping trade, bar range too small: {bar_range:.5f}")
+            return None
+
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        # (Below is the same logic as before)
+        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        current_spread = bar_range * 0.1
         can_trade, reason = self._validate_ftmo_rules(current_time, current_spread, symbol)
         if not can_trade:
             self.logger.debug(f"[{symbol}] FTMO check failed: {reason}")
@@ -457,7 +488,6 @@ class SR_Bounce_Strategy:
         base_size = self.calculate_position_size(balance, stop_distance)
         take_profit = self.calculate_take_profit(entry_price, stop_loss, symbol)
 
-        # Create trade object
         new_trade = SR_Bounce_Strategy.Trade(
             open_i=i,
             open_time=str(last_bar["time"]),
@@ -498,11 +528,8 @@ class SR_Bounce_Strategy:
     ) -> Tuple[bool, float, float]:
         """
         Checks if the trade hits SL or TP intrabar (based on the bar's high & low).
-        If intrabar hit occurs, calculates fill_price accordingly. Otherwise, returns no exit.
-
-        Returns:
-          - (True, fill_price, pnl) if exit triggered
-          - (False, 0.0, 0.0) if not
+        If intrabar hit occurs, calculates fill_price accordingly.
+        Otherwise, returns no exit.
         """
 
         if df_segment.empty:
@@ -518,17 +545,8 @@ class SR_Bounce_Strategy:
         take_profit = trade.tp
 
         # We assume the bar moves from OPEN -> HIGH/LOW -> CLOSE or OPEN -> LOW/HIGH -> CLOSE.
-        # We'll do a simplified check of which level was hit first for a BUY vs. SELL trade.
-
-        # For a BUY trade:
         if trade.type == "BUY":
-            # Check if the bar's low touches or breaks stop_loss
-            # Check if the bar's high touches or breaks take_profit
-            # We attempt a rudimentary "order of hits" approach:
-            # 1) If bar_low <= SL and bar_high >= TP, see which is closer to the open price => that is hit first
-            # 2) Else if bar_low <= SL only => SL hit
-            # 3) Else if bar_high >= TP only => TP hit
-            # 4) Else => no exit
+            # If bar_low <= SL and bar_high >= TP, check which is closer to open
             if bar_low <= stop_loss and bar_high >= take_profit:
                 dist_to_sl = abs(bar_open - stop_loss)
                 dist_to_tp = abs(bar_open - take_profit)
@@ -545,17 +563,13 @@ class SR_Bounce_Strategy:
                 fill_price = take_profit
                 reason = "Take profit hit intrabar"
             else:
-                # No exit
                 return False, 0.0, 0.0
 
-            # Compute PnL
             pnl = (fill_price - trade.entry_price) * 10000.0 * trade.size
             trade.exit_reason = reason
 
-        # For a SELL trade:
         else:
-            # Check if bar_high >= stop_loss
-            # Check if bar_low <= take_profit
+            # SELL trade
             if bar_high >= stop_loss and bar_low <= take_profit:
                 dist_to_sl = abs(bar_open - stop_loss)
                 dist_to_tp = abs(bar_open - take_profit)
@@ -577,7 +591,6 @@ class SR_Bounce_Strategy:
             pnl = (trade.entry_price - fill_price) * 10000.0 * trade.size
             trade.exit_reason = reason
 
-        # If we got here, the trade is considered closed
         return True, fill_price, pnl
 
     def validate_cross_pair_exposure(
@@ -587,8 +600,7 @@ class SR_Bounce_Strategy:
         current_balance: float,
     ) -> Tuple[bool, str]:
         """
-        Validate that adding new_trade won't exceed correlation or total lot constraints
-        across all active trades in the account.
+        Validate that adding new_trade won't exceed correlation or total lot constraints.
         """
         HIGH_CORR_THRESHOLD = 0.95
         MEDIUM_CORR_THRESHOLD = 0.70
@@ -724,6 +736,11 @@ class SR_Bounce_Strategy:
         """
         Simple bounce-based signal generator. Checks volume thresholds, correlation,
         and adjacency to known S/R levels.
+
+        Adjusted logic:
+          - Second bounce volume threshold lowered to 50% (was 80%)
+          - Reduced bounce cooldown from 2 hours to 1 hour
+          - Lowered min_touches to ~3 in the docstring
         """
 
         def __init__(
@@ -748,20 +765,22 @@ class SR_Bounce_Strategy:
             # Symbol-specific config
             self.pair_settings = {
                 "EURUSD": {
-                    "min_touches": 8,
-                    "min_volume_threshold": 1200,
+                    "min_touches": 3,
+                    "min_volume_threshold": 500,
                     "margin_pips": 0.0030,
                     "tolerance": 0.0005,
-                    "min_bounce_volume": 1000,
+                    "min_bounce_volume": 400,  # Was 1000
                 },
                 "GBPUSD": {
-                    "min_touches": 7,
-                    "min_volume_threshold": 1500,
+                    "min_touches": 3,
+                    "min_volume_threshold": 600,
                     "margin_pips": 0.0035,
                     "tolerance": 0.0007,
-                    "min_bounce_volume": 1200,
+                    "min_bounce_volume": 500,  # Was 1200
                 },
             }
+            # 1-hour cooldown instead of 2 hours
+            self.bounce_cooldown = pd.Timedelta(hours=1)
 
         def generate_signal(self, df_segment: pd.DataFrame, symbol: str) -> Dict[str, Any]:
             """Generate a simple BUY/SELL signal if last bar is near an S/R level with enough volume."""
@@ -771,9 +790,12 @@ class SR_Bounce_Strategy:
 
             settings = self.pair_settings.get(symbol, self.pair_settings["EURUSD"])
             correlation_threshold = 0.95
-            correlations = self.parent_strategy.symbol_correlations.get(symbol, {})
+            if self.parent_strategy:
+                correlations = self.parent_strategy.symbol_correlations.get(symbol, {})
+            else:
+                correlations = {}
 
-            # Quick correlation block, just as an example check
+            # Quick correlation block
             for other_symbol, corr_val in correlations.items():
                 if abs(corr_val) > correlation_threshold:
                     reason = f"Correlation {corr_val:.2f} with {other_symbol} exceeds {correlation_threshold}"
@@ -802,12 +824,13 @@ class SR_Bounce_Strategy:
                 near_resistance = bearish and (abs(high_ - lvl) <= tol)
                 distance_pips = abs(close_ - lvl) * 10000
 
+                # skip if level is more than 15 pips away from close
                 if distance_pips > 15:
                     continue
 
                 if near_support or near_resistance:
                     self.logger.debug(
-                        f"{symbol} potential bounce at level={lvl}, time={last_bar['time']}, volume={last_bar_volume}"
+                        f"{symbol} potential bounce at level={lvl}, time={last_bar['time']}, vol={last_bar_volume}"
                     )
                     signal = self._process_bounce(
                         lvl, last_bar_volume, last_bar["time"], is_support=near_support, symbol=symbol
@@ -824,6 +847,8 @@ class SR_Bounce_Strategy:
         ) -> Optional[Dict[str, Any]]:
             """
             Handle the first bounce registration and second bounce signal creation.
+            Lowered required second bounce volume to 50% of first bounce.
+            1-hour cooldown between trades on the same level.
             """
             settings = self.pair_settings.get(symbol, self.pair_settings["EURUSD"])
             if symbol not in self.bounce_registry:
@@ -840,18 +865,18 @@ class SR_Bounce_Strategy:
                 self.signal_stats["first_bounce_recorded"] += 1
                 return self._create_no_signal(f"First bounce recorded for {symbol} at {level}")
 
-            # If there's a recent bounce, ensure we don't over-trade
+            # If there's a recent bounce, ensure cooldown
             if self.bounce_registry[symbol][level_key].get("last_trade_time"):
                 last_trade = pd.to_datetime(self.bounce_registry[symbol][level_key]["last_trade_time"])
                 current_time = pd.to_datetime(time_val)
-                if current_time - last_trade < pd.Timedelta(hours=2):
+                if current_time - last_trade < self.bounce_cooldown:
                     return self._create_no_signal(f"Level {level} in cooldown for {symbol}")
 
             first_vol = self.bounce_registry[symbol][level_key]["first_bounce_volume"]
             min_vol_threshold = settings["min_bounce_volume"]
 
-            # If second bounce has insufficient volume
-            if volume < min_vol_threshold or volume < first_vol * 0.8:
+            # If second bounce has insufficient volume (<50% of first bounce) or below min_bounce_volume
+            if volume < min_vol_threshold or volume < (first_vol * 0.50):
                 self.signal_stats["second_bounce_low_volume"] += 1
                 return self._create_no_signal("Second bounce volume insufficient")
 
@@ -870,3 +895,4 @@ class SR_Bounce_Strategy:
             """Return a dict representing no-signal."""
             self.logger.debug(f"No signal: {reason}")
             return {"type": "NONE", "strength": 0.0, "reasons": [reason], "level": None}
+

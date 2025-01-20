@@ -78,7 +78,7 @@ def load_data(
             else:
                 print("Local CSV has no bars in the sub-range, fetching from broker...")
 
-        # Partial coverage (missing data)
+        # Partial coverage
         else:
             missing_start = None
             missing_end = None
@@ -314,7 +314,6 @@ def check_h1_data_or_resample(
         logger.warning(f"Validation error on H1: {str(e)}. Falling back to M15.")
         return fallback_resample_from_m15(symbol, h1_start, h1_end)
 
-    # Check completeness
     df_h1_min = pd.to_datetime(df_h1["time"].min())
     df_h1_max = pd.to_datetime(df_h1["time"].max())
     day_span = (df_h1_max - df_h1_min).days
@@ -459,12 +458,7 @@ def run_backtest_step5(
 ) -> Dict:
     """
     Multi-symbol backtest with advanced FTMO + cross-pair correlation checks.
-    Enhancements:
-      - Intrabar daily drawdown checks (floating PnL).
-      - Force-close trades if daily or max drawdown is exceeded.
-      - Enforce 'max_positions' across all symbols simultaneously.
     """
-
     logger.debug("Starting multi-symbol backtest step5...")
 
     if not symbol_data_dict:
@@ -507,16 +501,11 @@ def run_backtest_step5(
             daily_high_balance = balance
             logger.debug(f"New day: {bar_date} -> daily high {balance:.2f}")
 
-        # Always update the daily_high_balance if the current balance is higher
         daily_high_balance = max(daily_high_balance, balance)
 
-        # -----------------------------------------------------------
-        # 1) If a trade is active for this symbol, check for exit
-        #    and update daily drawdown. Force-close if needed.
-        # -----------------------------------------------------------
+        # 1) If a trade is active for this symbol, check for exit + drawdown
         if active_trades[symbol]:
             trade = active_trades[symbol]
-            # Attempt normal exit first (using intrabar logic):
             exited, fill_price, pnl = strategy.exit_trade(symbol_slice, trade, symbol)
             if exited:
                 balance += pnl
@@ -528,16 +517,15 @@ def run_backtest_step5(
                 logger.debug(f"[{symbol}] Trade closed with PnL={pnl:.2f}")
                 active_trades[symbol] = None
             else:
-                # If not exited, compute floating PnL to check drawdown limits
+                # If not exited, compute floating PnL
                 current_price = float(current_bar["close"])
                 if trade.type == "BUY":
                     floating_pnl = (current_price - trade.entry_price) * 10000.0 * trade.size
                 else:
                     floating_pnl = (trade.entry_price - current_price) * 10000.0 * trade.size
 
-                # Daily drawdown as ratio of initial_balance
+                # Daily drawdown
                 daily_dd_ratio = (balance + floating_pnl - daily_high_balance) / initial_balance
-                # Overall drawdown as ratio from initial_balance
                 total_dd_ratio = (balance + floating_pnl - initial_balance) / initial_balance
 
                 # Force close if daily or max drawdown is exceeded
@@ -562,9 +550,7 @@ def run_backtest_step5(
                     closed_trades.append(trade)
                     active_trades[symbol] = None
 
-        # -----------------------------------------------------------
         # 2) Attempt to open a new trade if none active for this symbol
-        # -----------------------------------------------------------
         if active_trades[symbol] is None:
             # Enforce the global 'max_positions' limit across all symbols
             currently_open_positions = sum(t is not None for t in active_trades.values())
@@ -574,24 +560,19 @@ def run_backtest_step5(
 
             new_trade = strategy.open_trade(symbol_slice, balance, i, symbol=symbol)
             if new_trade:
-                # Before finalizing, do cross-pair exposure checks
+                # Cross-pair exposure checks
                 can_open, reason = strategy.validate_cross_pair_exposure(
                     new_trade, active_trades, balance
                 )
                 if can_open:
                     active_trades[symbol] = new_trade
-                    logger.debug(
-                        f"[{symbol}] Opened trade: {new_trade.type} at {new_trade.entry_price:.5f}"
-                    )
+                    logger.debug(f"[{symbol}] Opened trade: {new_trade.type} at {new_trade.entry_price:.5f}")
                 else:
                     logger.debug(f"[{symbol}] Cross-pair or exposure check failed: {reason}")
 
-    # -----------------------------------------------------------
-    # End of data: force close any leftover trades at final bar
-    # -----------------------------------------------------------
+    # End of data: force close any leftover trades
     for sym, trade in active_trades.items():
         if trade is not None:
-            # Use final bar for that symbol to close
             sym_df = all_data[all_data["symbol"] == sym].iloc[-1]
             last_close = float(sym_df["close"])
             if trade.type == "BUY":
@@ -619,14 +600,13 @@ def main():
     print("Starting backtest with simplified code...\n")
 
     # ----------------------------------------------------------------
-    # INCREASED SAMPLE FROM 180 DAYS TO 365 DAYS FOR A FULL YEAR
-    # S/R LOOKBACK EXTENDED TO 120 DAYS FOR MORE RELIABLE LEVELS
+    # We keep the same config, but reduce 'days' if needed
     # ----------------------------------------------------------------
     backtest_config = {
         "symbols": ["EURUSD", "GBPUSD"],
         "timeframe": "M15",
-        "days": 365,  # Increase from 45 or 180 to 365 for more robust testing
-        "sr_lookback_days": 120,  # More time for weekly S/R identification
+        "days": 365,  # or reduce to see faster tests
+        "sr_lookback_days": 90,  # a bit less to speed up S/R detection
         "initial_balance": 10000.0,
         "report_path": "comprehensive_backtest_report.md",
         "ftmo_limits": {
@@ -638,7 +618,6 @@ def main():
         },
     }
 
-    # Load + validate data per symbol
     symbol_data_dict = {}
     for symbol in backtest_config["symbols"]:
         print(f"\nLoading {backtest_config['timeframe']} data for {symbol} ...")
@@ -704,12 +683,11 @@ def main():
         print(f"Total PnL: ${stats['total_pnl']:.2f}")
         print(f"Final Balance: ${final_balance:.2f}")
 
-        # Minimal config for final report
         minimal_strategy_config = {
-            "params": {"min_touches": 8, "risk_reward": 3.0},
+            "params": {"min_touches": 3, "risk_reward": 2.0},
             "pair_settings": {
-                "EURUSD": {"tolerance": 0.0005, "min_volume_threshold": 1200, "min_bounce_volume": 1000},
-                "GBPUSD": {"tolerance": 0.0007, "min_volume_threshold": 1500, "min_bounce_volume": 1200},
+                "EURUSD": {"tolerance": 0.0005, "min_volume_threshold": 500, "min_bounce_volume": 400},
+                "GBPUSD": {"tolerance": 0.0007, "min_volume_threshold": 600, "min_bounce_volume": 500},
             },
             "ftmo_limits": backtest_config["ftmo_limits"],
         }
@@ -722,7 +700,7 @@ def main():
         with ReportWriter(backtest_config["report_path"]) as rw:
             rw.generate_full_report(
                 strategy_config=minimal_strategy_config,
-                df_test=symbol_data_dict["EURUSD"],
+                df_test=symbol_data_dict["EURUSD"],  # example
                 trades=trades,
                 stats=stats,
                 final_balance=final_balance,
@@ -752,7 +730,7 @@ def main():
         if not df_h1.empty:
             strategy.update_weekly_levels(df_h1, symbol=default_symbol, weeks=2, weekly_buffer=0.00075)
 
-        # Training set bounce detection
+        # Simple bounce detection on train set
         bounce_count = 0
         for i in range(len(train_df)):
             seg = train_df.iloc[: i + 1]
@@ -774,7 +752,7 @@ def main():
         print(f"Total PnL: ${sp_stats['total_pnl']:.2f}")
         print(f"Final Balance: ${sp_final_balance:.2f}")
 
-        # (Optional) Generate report similarly if desired
+        # (Optional) Generate report
         # with ReportWriter(backtest_config["report_path"]) as rw:
         #     ...
         # print(f"Single-symbol report generated: {backtest_config['report_path']}")
